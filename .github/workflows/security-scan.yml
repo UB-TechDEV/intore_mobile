@@ -1,0 +1,20 @@
+# This is the thin caller workflow the bot pushes into every UB-TechDEV repo
+# as .github/workflows/security-scan.yml (bootstrap PR on repo creation, and
+# a one-time backfill PR for pre-existing repos). Kept here as the source of
+# truth the compliance job diffs against.
+name: security-scan
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  schedule:
+    - cron: "17 2 * * *" # nightly scan of the default branch
+
+jobs:
+  scan:
+    uses: UB-TechDEV/org-security/.github/workflows/scan.yml@main
+    secrets:
+      BOT_SCAN_RESULT_URL: ${{ secrets.BOT_SCAN_RESULT_URL }}
+      BOT_SCAN_SHARED_SECRET: ${{ secrets.BOT_SCAN_SHARED_SECRET }}
+      SCANNER_APP_ID: ${{ secrets.SCANNER_APP_ID }}
+      SCANNER_APP_PRIVATE_KEY: ${{ secrets.SCANNER_APP_PRIVATE_KEY }}
