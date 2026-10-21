@@ -29,3 +29,7 @@ Other sample values from the prototype:
 - Unpaid invitation: `2200 1876`
 
 Face match scores and liveness ticks are prototype simulations, not a production SDK.
+
+## Backend
+
+The phone is not wired to a server yet. What we need from the backend for every screen action is in [docs/backend-contract.md](docs/backend-contract.md).
