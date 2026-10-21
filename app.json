@@ -1,0 +1,54 @@
+{
+  "expo": {
+    "name": "FPR Diaspora",
+    "slug": "intore-mobile",
+    "version": "2.4.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "rw.diaspora.intore",
+      "infoPlist": {
+        "NSCameraUsageDescription": "The camera is used to enrol a face and to scan invitation QR codes at the gate."
+      }
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "The camera is used to enrol a face and to scan invitation QR codes at the gate.",
+          "recordAudioAndroid": false
+        }
+      ],
+      [
+        "expo-font",
+        {
+          "fonts": [
+            "./assets/fonts/Glancyr-Light.otf",
+            "./assets/fonts/Glancyr-Regular.otf",
+            "./assets/fonts/Glancyr-Medium.otf",
+            "./assets/fonts/Glancyr-Semibold.otf",
+            "./assets/fonts/Glancyr-Bold.otf"
+          ]
+        }
+      ]
+    ],
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "package": "rw.diaspora.intore",
+      "permissions": [
+        "android.permission.CAMERA"
+      ],
+      "predictiveBackGestureEnabled": true
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}
