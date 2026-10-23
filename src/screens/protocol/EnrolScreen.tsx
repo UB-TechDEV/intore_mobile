@@ -6,12 +6,13 @@ import { Animated, Easing, Image, Pressable, ScrollView, StyleSheet, View } from
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { DetailLine, IconButton, PrimaryButton, SecondaryButton } from '../../components/ui';
-import { SAMPLE_EVENT } from '../../data/sample';
+import { confirmEnrolmentCode, enrollFace, sendEnrolmentCode } from '../../api/event';
+import { jpegPart, mapFaceStatus } from '../../api/format';
+import { isApiError } from '../../api/problem';
 import { Text, TextInput } from '../../theme/text';
-import { faceStatus, verifyEnrolmentCode } from '../../domain/rules';
 import { useTx } from '../../i18n';
 import type { FacesStackParamList } from '../../navigation/types';
-import { useSession } from '../../state/session';
+import { errorMessage, useSession } from '../../state/session';
 import { colors, radius } from '../../theme/tokens';
 
 type Props = NativeStackScreenProps<FacesStackParamList, 'Enrol'>;
@@ -41,17 +42,49 @@ export function EnrolScreen({ route, navigation }: Props) {
   const { tx } = useTx();
   const insets = useSafeAreaInsets();
   const session = useSession();
-  const person = session.people.find((item) => item.id === route.params.personId);
+  const eventId = session.faces?.eventId ?? session.post?.eventId;
+  const person = session.faces?.people?.find((item) => item.id === route.params.personId);
   const [step, setStep] = useState<Step>('check');
   const [checks, setChecks] = useState<Record<string, boolean>>({});
   const [code, setCode] = useState('');
   const [codeState, setCodeState] = useState<'idle' | 'ok' | 'bad'>('idle');
-  const [resent, setResent] = useState(false);
+  const [codeError, setCodeError] = useState('');
+  const [sentTo, setSentTo] = useState(person?.maskedEmail ?? '');
+  const [expiresIn, setExpiresIn] = useState<number | null>(null);
   const [liveIndex, setLiveIndex] = useState(-1);
   const [photoUri, setPhotoUri] = useState<string | undefined>();
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
   const cameraRef = useRef<CameraView>(null);
   const [permission, requestPermission] = useCameraPermissions();
+
+  useEffect(() => {
+    if (person) return;
+    void session.loadFaces(session.post?.eventId).catch(() => undefined);
+    // load the roster if we arrived from check-in without opening Faces
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [route.params.personId]);
+
+  const sendCode = async () => {
+    if (!person || !eventId) return;
+    try {
+      const result = await sendEnrolmentCode(person.id, eventId);
+      setSentTo(result.sentTo || person.maskedEmail || '');
+      setExpiresIn(result.expiresInSeconds ?? 600);
+      setCodeState('idle');
+      setCodeError('');
+    } catch (caught) {
+      setCodeError(errorMessage(caught, tx('Could not send the code.', 'Impossible d’envoyer le code.')));
+    }
+  };
+
+  useEffect(() => {
+    if (person && eventId && mapFaceStatus(person.status) !== 'id-missing') {
+      void sendCode();
+    }
+    // send once when the screen opens
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [person?.id, eventId]);
 
   useEffect(() => {
     if (step !== 'camera') return;
@@ -76,23 +109,37 @@ export function EnrolScreen({ route, navigation }: Props) {
   }, [step, permission?.granted, requestPermission]);
 
   if (!person) {
-    return null;
+    return (
+      <View style={[styles.screen, { paddingTop: insets.top, justifyContent: 'center', padding: 24 }]}>
+        <StatusBar style="dark" />
+        <Text style={{ color: colors.muted, textAlign: 'center' }}>
+          {tx('Loading this person…', 'Chargement de cette personne…')}
+        </Text>
+      </View>
+    );
   }
 
-  const status = faceStatus(person, session.enrolledIds);
+  const status = mapFaceStatus(person.status);
   const idMissing = status === 'id-missing';
   const checksDone = DOCUMENT_CHECKS.every(([id]) => checks[id]);
   const codeOk = codeState === 'ok';
   const liveDone = liveIndex >= LIVE_STEPS.length;
-  const givenName = person.name.split(' ')[0] ?? person.name;
+  const givenName = (person.name ?? '').split(' ')[0] || person.name || '';
 
-  const submitCode = (value: string) => {
-    setCode(value);
-    if (value.trim().length < 4) {
-      setCodeState('idle');
-      return;
+  const submitCode = async () => {
+    if (!eventId || code.replace(/\D/g, '').length < 6) return;
+    setCodeError('');
+    try {
+      await confirmEnrolmentCode(person.id, eventId, code.replace(/\D/g, ''));
+      setCodeState('ok');
+    } catch (caught) {
+      setCodeState('bad');
+      if (isApiError(caught) && caught.fieldMessage('code')) {
+        setCodeError(caught.fieldMessage('code') ?? caught.detail);
+      } else {
+        setCodeError(errorMessage(caught, tx('Wrong code', 'Code incorrect')));
+      }
     }
-    setCodeState(verifyEnrolmentCode(value) ? 'ok' : 'bad');
   };
 
   const takePhoto = async () => {
@@ -107,18 +154,19 @@ export function EnrolScreen({ route, navigation }: Props) {
     }
   };
 
-  const save = () => {
-    if (saving) return;
+  const save = async () => {
+    if (saving || !photoUri || !eventId) return;
     setSaving(true);
-    session.enrol({
-      personId: person.id,
-      at: '9 Oct 2026',
-      photoUri,
-      by: 'Karangwa Fidèle',
-      gate: 'Gate 2',
-    });
-    setStep('saved');
-    setSaving(false);
+    setSaveError('');
+    try {
+      await enrollFace(person.id, eventId, jpegPart(photoUri, 'face.jpg'));
+      await session.loadFaces(eventId);
+      setStep('saved');
+    } catch (caught) {
+      setSaveError(errorMessage(caught, tx('Could not save the photo.', 'Impossible d’enregistrer la photo.')));
+    } finally {
+      setSaving(false);
+    }
   };
 
   if (step === 'camera') {
@@ -204,7 +252,7 @@ export function EnrolScreen({ route, navigation }: Props) {
         {step === 'saved' ? (
           <View style={styles.saved}>
             <View style={styles.savedPhoto}>
-              {photoUri ? <Image source={{ uri: photoUri }} style={styles.savedImage} /> : <Text style={styles.savedInitials}>{person.initials}</Text>}
+              {photoUri ? <Image source={{ uri: photoUri }} style={styles.savedImage} /> : <Text style={styles.savedInitials}>{(person.name ?? '?').slice(0, 2)}</Text>}
               <View style={styles.savedBadge}>
                 <Ionicons name="checkmark" size={18} color={colors.white} />
               </View>
@@ -216,7 +264,9 @@ export function EnrolScreen({ route, navigation }: Props) {
                 `La photo de ${givenName} est maintenant sur le profil. Quand le code QR est scanné à la porte, cette photo s’affiche pour confirmer la personne.`,
               )}
             </Text>
-            <Text style={styles.savedMeta}>{tx('Enrolled by Karangwa Fidèle · Gate 2', 'Enregistré par Karangwa Fidèle · Porte 2')}</Text>
+            <Text style={styles.savedMeta}>
+              {tx(`Enrolled by ${session.fullName}${session.post?.gateName ? ` · ${session.post.gateName}` : ''}`, `Enregistré par ${session.fullName}${session.post?.gateName ? ` · ${session.post.gateName}` : ''}`)}
+            </Text>
             <PrimaryButton
               label={tx('Go to gate check', 'Aller au contrôle')}
               icon="scan"
@@ -268,10 +318,10 @@ export function EnrolScreen({ route, navigation }: Props) {
                   </View>
                 </View>
                 <View style={styles.identityCard}>
-                  <DetailLine label={person.documentLabel || tx('ID', 'Pièce')} value={person.documentNumber || tx('Missing', 'Manquante')} warning={idMissing} />
-                  <DetailLine label={tx('Cell', 'Cellule')} value={person.cell} />
-                  <DetailLine label={tx('Role', 'Rôle')} value={`${person.role} · ${tx('seat', 'place')} ${person.seat}`} />
-                  <DetailLine label={tx('Invited to', 'Invité à')} value={SAMPLE_EVENT} />
+                  <DetailLine label={tx('ID', 'Pièce')} value={person.nationalId || tx('Missing', 'Manquante')} warning={idMissing} />
+                  <DetailLine label={tx('Cell', 'Cellule')} value={person.cell || '—'} />
+                  <DetailLine label={tx('Role', 'Rôle')} value={`${person.role ?? '—'} · ${tx('seat', 'place')} ${person.seat || '—'}`} />
+                  <DetailLine label={tx('Invited to', 'Invité à')} value={session.faces?.eventName || session.post?.eventName || '—'} />
                 </View>
                 {idMissing ? (
                   <Text style={styles.block}>
@@ -304,35 +354,34 @@ export function EnrolScreen({ route, navigation }: Props) {
                     <Text style={styles.ask}>{tx('Ask for the code we just emailed them', 'Demandez le code que nous venons de leur envoyer')}</Text>
                     <Text style={styles.mail}>
                       {tx(
-                        `Sent to ${person.emailMasked} — proves the email on their profile is theirs`,
-                        `Envoyé à ${person.emailMasked} — prouve que l’e-mail du profil est le leur`,
+                        `Sent to ${sentTo || 'their email'}${expiresIn ? ` · expires in ${Math.round(expiresIn / 60)} min` : ''} — proves the email on their profile is theirs`,
+                        `Envoyé à ${sentTo || 'leur e-mail'}${expiresIn ? ` · expire dans ${Math.round(expiresIn / 60)} min` : ''} — prouve que l’e-mail du profil est le leur`,
                       )}
                     </Text>
                     <TextInput
                       accessibilityLabel={tx('Code from their email', 'Code reçu par e-mail')}
                       value={code}
-                      onChangeText={submitCode}
+                      onChangeText={(value) => {
+                        setCode(value.replace(/\D/g, '').slice(0, 6));
+                        setCodeState('idle');
+                        setCodeError('');
+                      }}
                       keyboardType="number-pad"
-                      maxLength={4}
-                      placeholder="••••"
+                      maxLength={6}
+                      placeholder="••••••"
                       placeholderTextColor={colors.faint}
                       style={styles.code}
                     />
                     <Text style={styles.demo}>
-                      {tx('Sample code:', 'Code d’exemple :')} <Text style={styles.demoStrong}>4829</Text>
+                      {tx('6-digit code from their email.', 'Code à 6 chiffres reçu par e-mail.')}
                       {'  ·  '}
-                      <Text style={styles.link} onPress={() => setResent(true)}>{tx('Resend email', 'Renvoyer l’e-mail')}</Text>
+                      <Text style={styles.link} onPress={() => void sendCode()}>{tx('Resend email', 'Renvoyer l’e-mail')}</Text>
                     </Text>
-                    {resent ? (
-                      <Text style={styles.mail}>
-                        {tx(
-                          'Resend is saved on this phone. No email server is connected in this build.',
-                          'Le renvoi est noté sur ce téléphone. Aucun serveur d’e-mail n’est connecté dans cette version.',
-                        )}
-                      </Text>
+                    {code.replace(/\D/g, '').length === 6 && codeState !== 'ok' ? (
+                      <PrimaryButton label={tx('Check the code', 'Vérifier le code')} onPress={() => void submitCode()} />
                     ) : null}
                     {codeState === 'ok' ? <Text style={styles.ok}>{tx('Code correct', 'Code correct')}</Text> : null}
-                    {codeState === 'bad' ? <Text style={styles.bad}>{tx('Wrong code', 'Code incorrect')}</Text> : null}
+                    {codeError ? <Text style={styles.bad}>{codeError}</Text> : null}
                     {checksDone && codeOk ? (
                       <PrimaryButton label={tx('Open the camera', 'Ouvrir l’appareil photo')} icon="camera" onPress={() => setStep('camera')} />
                     ) : (
@@ -359,7 +408,7 @@ export function EnrolScreen({ route, navigation }: Props) {
                   <View style={styles.reviewCopy}>
                     <Text style={styles.reviewName}>{person.name}</Text>
                     <Text style={styles.reviewMeta}>
-                      {person.documentLabel} {person.documentNumber}
+                      {person.nationalId || tx('ID missing', 'Pièce manquante')}
                     </Text>
                     {QUALITY_CHECKS.map(([en, fr]) => (
                       <View key={en} style={styles.quality}>
@@ -377,13 +426,14 @@ export function EnrolScreen({ route, navigation }: Props) {
                     )}
                   </Text>
                 </View>
+                {saveError ? <Text style={styles.bad}>{saveError}</Text> : null}
                 <View style={styles.reviewActions}>
                   <PrimaryButton
                     label={tx('Save to her profile', 'Enregistrer sur son profil')}
                     tone="success"
                     icon="checkmark"
                     disabled={saving}
-                    onPress={save}
+                    onPress={() => void save()}
                   />
                   <SecondaryButton label={tx('Retake', 'Reprendre')} onPress={() => setStep('camera')} />
                 </View>

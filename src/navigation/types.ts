@@ -1,5 +1,7 @@
 import type { NavigatorScreenParams } from '@react-navigation/native';
 
+import type { ResolveResponse } from '../api/types';
+
 export type FacesStackParamList = {
   FacesHome: undefined;
   Enrol: { personId: string };
@@ -7,7 +9,7 @@ export type FacesStackParamList = {
 
 export type CheckStackParamList = {
   CheckHome: undefined;
-  Confirm: { personId: string; how: 'face' | 'qr' | 'number' };
+  Confirm: { how: 'qr' | 'number'; resolve: ResolveResponse };
 };
 
 export type ProfileStackParamList = {
@@ -32,6 +34,6 @@ export type RootStackParamList = {
   SignIn: undefined;
   Protocol: NavigatorScreenParams<ProtocolTabParamList> | undefined;
   Member: NavigatorScreenParams<MemberTabParamList> | undefined;
-  Ballot: undefined;
+  Ballot: { voteId?: string } | undefined;
   PersonalDetails: undefined;
 };

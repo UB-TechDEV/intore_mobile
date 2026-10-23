@@ -2,17 +2,19 @@ import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
+import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import type { RootStackParamList } from '../../navigation/types';
 import { Image, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { BALLOT_OPTIONS } from '../../data/sample';
-import { canCastVote } from '../../domain/rules';
+import { castBallot, getMyVote, listMyVotes, verifyVotePin } from '../../api/event';
+import { initialsOf, secondsUntilEndOf } from '../../api/format';
+import type { MyHostVoteView } from '../../api/types';
 import { useTx } from '../../i18n';
-import { useSession } from '../../state/session';
+import { errorMessage, useSession } from '../../state/session';
 import { Text } from '../../theme/text';
 import { colors, radius } from '../../theme/tokens';
 
 const FPR_MARK = require('../../../assets/brand/fpr-inkotanyi.png');
-const START_SECONDS = 12 * 24 * 60 * 60 + 6 * 60 * 60 + 42 * 60 + 6;
 const KEY_ROWS = [
   ['1', '2', '3'],
   ['4', '5', '6'],
@@ -20,16 +22,52 @@ const KEY_ROWS = [
   ['', '0', '<'],
 ] as const;
 
-export function BallotScreen() {
+type Props = NativeStackScreenProps<RootStackParamList, 'Ballot'>;
+
+export function BallotScreen({ route }: Props) {
   const { tx, language, setLanguage } = useTx();
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
   const session = useSession();
-  const [step, setStep] = useState<'pin' | 'ballot' | 'done'>(session.voteChoice ? 'done' : 'pin');
+  const [vote, setVote] = useState<MyHostVoteView | null>(null);
+  const [step, setStep] = useState<'pin' | 'ballot' | 'done'>('pin');
   const [pin, setPin] = useState('');
-  const [pick, setPick] = useState<string | null>(session.voteChoice);
-  const [left, setLeft] = useState(START_SECONDS);
+  const [pinError, setPinError] = useState('');
+  const [pick, setPick] = useState<string | null>(null);
+  const [verificationId, setVerificationId] = useState<string | null>(null);
+  const [left, setLeft] = useState(0);
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const [choiceName, setChoiceName] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const requested = route.params?.voteId;
+        const page = requested ? null : await listMyVotes();
+        const id = requested ?? page?.data?.find((item) => item.status === 'ACTIVE')?.id ?? page?.data?.[0]?.id;
+        if (!id) {
+          setError(tx('There is no open ballot.', 'Il n’y a pas de scrutin ouvert.'));
+          return;
+        }
+        const detail = await getMyVote(id);
+        if (cancelled) return;
+        setVote(detail);
+        setLeft(secondsUntilEndOf(detail.closesOn));
+        if (detail.myChoiceCellId) {
+          setPick(detail.myChoiceCellId);
+          setChoiceName(detail.myChoiceName ?? '');
+          setStep('done');
+        }
+      } catch (caught) {
+        if (!cancelled) setError(errorMessage(caught, tx('Could not load the ballot.', 'Impossible de charger le scrutin.')));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [route.params?.voteId, tx]);
 
   useEffect(() => {
     const timer = setInterval(() => setLeft((value) => Math.max(0, value - 1)), 1000);
@@ -42,22 +80,38 @@ export function BallotScreen() {
   const seconds = left % 60;
   const pad = (value: number) => String(value).padStart(2, '0');
   const countdown = `${days}d ${pad(hours)}h ${pad(minutes)}m ${pad(seconds)}s`;
-  const choiceName = BALLOT_OPTIONS.find((option) => option.id === pick)?.name ?? session.voteChoice ?? '';
-
-  const addDigit = (digit: string) => {
-    if (pin.length >= 4) return;
+  const addDigit = async (digit: string) => {
+    if (pin.length >= 4 || !vote) return;
     const next = pin + digit;
     setPin(next);
-    if (next.length === 4) setStep('ballot');
+    if (next.length !== 4) return;
+    setSubmitting(true);
+    setPinError('');
+    try {
+      const result = await verifyVotePin(vote.id, next);
+      setVerificationId(result.verificationId ?? null);
+      setStep('ballot');
+    } catch (caught) {
+      setPin('');
+      setPinError(errorMessage(caught, tx('Wrong PIN', 'Code incorrect')));
+    } finally {
+      setSubmitting(false);
+    }
   };
 
-  const vote = () => {
-    if (!pick || submitting || !canCastVote(session.voteChoice)) return;
+  const submitVote = async () => {
+    if (!pick || submitting || !vote || !verificationId) return;
     setSubmitting(true);
-    const option = BALLOT_OPTIONS.find((item) => item.id === pick);
-    if (option) session.castVote(option.name);
-    setStep('done');
-    setSubmitting(false);
+    setError('');
+    try {
+      const result = await castBallot(vote.id, pick, verificationId);
+      setChoiceName(result.myChoiceName || vote.candidates?.find((item) => item.orgUnitId === pick)?.name || '');
+      setStep('done');
+    } catch (caught) {
+      setError(errorMessage(caught, tx('Could not record the vote.', 'Impossible d’enregistrer le vote.')));
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -86,8 +140,8 @@ export function BallotScreen() {
               <Text style={[styles.langText, language === 'fr' ? styles.langTextOn : null]}>FR</Text>
             </Pressable>
           </View>
-          <View style={styles.ua} accessibilityLabel="Uwase Ange">
-            <Text style={styles.uaText}>UA</Text>
+          <View style={styles.ua} accessibilityLabel={session.fullName}>
+            <Text style={styles.uaText}>{session.initials || initialsOf(session.fullName, '·')}</Text>
           </View>
         </View>
       </View>
@@ -101,7 +155,10 @@ export function BallotScreen() {
               {tx('Who should host the RPF Europe Retreat 2027?', 'Qui doit accueillir la retraite Europe du FPR 2027 ?')}
             </Text>
             <Text style={styles.lead}>
-              {tx('Confirm it’s you, Ange — enter your 4-digit PIN.', 'Confirmez que c’est vous, Ange — saisissez votre code à 4 chiffres.')}
+              {tx(
+                `Confirm it’s you${session.fullName ? `, ${session.fullName.split(' ')[0]}` : ''} — enter your 4-digit PIN.`,
+                `Confirmez que c’est vous${session.fullName ? `, ${session.fullName.split(' ')[0]}` : ''} — saisissez votre code à 4 chiffres.`,
+              )}
             </Text>
             <View style={styles.countdownPill} accessibilityRole="timer">
               <Feather name="clock" size={14} color={colors.primary} />
@@ -139,7 +196,7 @@ export function BallotScreen() {
                         key={key}
                         accessibilityRole="button"
                         accessibilityLabel={key}
-                        onPress={() => addDigit(key)}
+                        onPress={() => void addDigit(key)}
                         style={({ pressed }) => [styles.key, pressed ? styles.keyPressed : null]}
                       >
                         <Text style={styles.keyLabel}>{key}</Text>
@@ -149,13 +206,12 @@ export function BallotScreen() {
                 </View>
               ))}
             </View>
+            {pinError ? <Text style={styles.secret}>{pinError}</Text> : null}
+            {error ? <Text style={styles.secret}>{error}</Text> : null}
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={tx('Use face recognition', 'Utiliser la reconnaissance du visage')}
-              onPress={() => {
-                setPin('0000');
-                setStep('ballot');
-              }}
+              onPress={() => setPinError(tx('Face verification is not available yet — use your PIN.', 'La vérification par visage n’est pas encore disponible — utilisez votre code.'))}
               style={styles.face}
             >
               <MaterialCommunityIcons name="face-recognition" size={18} color={colors.ink} />
@@ -171,36 +227,34 @@ export function BallotScreen() {
                 {tx('Closes in', 'Clôture dans')} <Text style={styles.countdownMono}>{countdown}</Text>
               </Text>
             </View>
-            <Text style={styles.meta}>{tx('Ballot · closes 20 Oct 2026', 'Scrutin · clôture le 20 oct 2026')}</Text>
+            <Text style={styles.meta}>{tx(`Ballot${vote?.closesOn ? ` · closes ${vote.closesOn}` : ''}`, `Scrutin${vote?.closesOn ? ` · clôture le ${vote.closesOn}` : ''}`)}</Text>
             <Text style={styles.ballotQuestion}>
               {tx('Who should host the RPF Europe Retreat 2027?', 'Qui doit accueillir la retraite Europe du FPR 2027 ?')}
             </Text>
-            {BALLOT_OPTIONS.map((option) => {
-              const selected = pick === option.id;
+            {(vote?.candidates ?? []).map((option) => {
+              const selected = pick === option.orgUnitId;
               return (
                 <Pressable
-                  key={option.id}
+                  key={option.orgUnitId}
                   accessibilityRole="radio"
                   accessibilityState={{ selected }}
                   accessibilityLabel={option.name}
-                  onPress={() => setPick(option.id)}
+                  onPress={() => setPick(option.orgUnitId)}
                   style={[styles.option, selected ? styles.optionOn : null]}
                 >
                   <View style={[styles.radio, selected ? styles.radioOn : null]} />
                   <View style={styles.optionText}>
                     <Text style={styles.optionName}>{option.name}</Text>
-                    <Text style={styles.optionCity}>
-                      {option.league} · {option.city}
-                    </Text>
                   </View>
                 </Pressable>
               );
             })}
+            {error ? <Text style={styles.secret}>{error}</Text> : null}
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={tx('Cast my vote', 'Voter')}
               disabled={!pick || submitting}
-              onPress={vote}
+              onPress={() => void submitVote()}
               style={[styles.cast, !pick ? styles.castOff : null]}
             >
               <Text style={styles.castText}>{tx('Cast my vote', 'Voter')}</Text>
@@ -216,8 +270,8 @@ export function BallotScreen() {
             <Text style={styles.doneTitle}>{tx('Vote recorded', 'Vote enregistré')}</Text>
             <Text style={styles.doneBody}>
               {tx(
-                `You voted for ${choiceName}. Results are published when the vote closes on 20 Oct 2026.`,
-                `Vous avez voté pour ${choiceName}. Les résultats sont publiés à la clôture du vote, le 20 oct 2026.`,
+                `You voted for ${choiceName}. Results are published when the vote closes${vote?.closesOn ? ` on ${vote.closesOn}` : ''}.`,
+                `Vous avez voté pour ${choiceName}. Les résultats sont publiés à la clôture du vote${vote?.closesOn ? `, le ${vote.closesOn}` : ''}.`,
               )}
             </Text>
             <Pressable accessibilityRole="button" onPress={() => navigation.goBack()} style={styles.back}>

@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { createBottomTabNavigator, type BottomTabBarProps } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BallotScreen } from '../screens/ballot/BallotScreen';
 import { SignInScreen } from '../screens/auth/SignInScreen';
@@ -21,6 +21,7 @@ import type {
   ProtocolTabParamList,
   RootStackParamList,
 } from './types';
+import { useSession } from '../state/session';
 import { Text } from '../theme/text';
 import { colors, font, type } from '../theme/tokens';
 
@@ -129,8 +130,17 @@ function MemberNavigator() {
 }
 
 export function RootNavigator() {
+  const { ready, signedIn, role } = useSession();
+  if (!ready) {
+    return (
+      <View style={styles.boot}>
+        <ActivityIndicator color={colors.primary} />
+      </View>
+    );
+  }
+  const initial = !signedIn ? 'SignIn' : role === 'protocol' ? 'Protocol' : 'Member';
   return (
-    <Root.Navigator initialRouteName="Protocol" screenOptions={{ headerShown: false }}>
+    <Root.Navigator key={signedIn ? role : 'guest'} initialRouteName={initial} screenOptions={{ headerShown: false }}>
       <Root.Screen name="SignIn" component={SignInScreen} />
       <Root.Screen name="Protocol" component={ProtocolNavigator} />
       <Root.Screen name="Member" component={MemberNavigator} />
@@ -141,6 +151,12 @@ export function RootNavigator() {
 }
 
 const styles = StyleSheet.create({
+  boot: {
+    flex: 1,
+    backgroundColor: colors.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   bar: {
     flexDirection: 'row',
     backgroundColor: colors.tabBar,

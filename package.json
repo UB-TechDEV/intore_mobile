@@ -12,6 +12,7 @@
     "expo-font": "~57.0.4",
     "expo-keep-awake": "~57.0.2",
     "expo-linear-gradient": "~57.0.2",
+    "expo-secure-store": "~57.0.4",
     "expo-status-bar": "~57.0.1",
     "react": "19.2.3",
     "react-native": "0.86.3",
@@ -29,7 +30,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/domain/rules.test.ts"
+    "test": "tsx --test src/domain/rules.test.ts src/api/problem.test.ts"
   },
   "private": true
 }

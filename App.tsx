@@ -3,9 +3,21 @@ import { useFonts } from 'expo-font';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useEffect } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { LanguageProvider } from './src/i18n';
+import { LanguageProvider, useTx, type ProfileLanguage } from './src/i18n';
 import { RootNavigator } from './src/navigation/RootNavigator';
 import { SessionProvider, useSession } from './src/state/session';
+
+function LanguageSync() {
+  const { me } = useSession();
+  const { profileLanguage, setLanguage } = useTx();
+  useEffect(() => {
+    const next = me?.preferredLanguage;
+    if (next === 'en' || next === 'fr' || next === 'rw') {
+      if (next !== profileLanguage) setLanguage(next as ProfileLanguage);
+    }
+  }, [me?.preferredLanguage, profileLanguage, setLanguage]);
+  return null;
+}
 
 function ShiftWake() {
   const { keepAwake, role, signedIn } = useSession();
@@ -39,6 +51,7 @@ export default function App() {
     <SafeAreaProvider>
       <LanguageProvider>
         <SessionProvider>
+          <LanguageSync />
           <ShiftWake />
           <NavigationContainer>
             <RootNavigator />

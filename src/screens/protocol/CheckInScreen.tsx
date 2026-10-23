@@ -1,14 +1,13 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { Ionicons } from '@expo/vector-icons';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { useEffect, useRef, useState } from 'react';
-import { Animated, Easing, Image, Pressable, StyleSheet, View } from 'react-native';
+import { Animated, Easing, Pressable, StyleSheet, View } from 'react-native';
 import { Keypad, PrimaryButton, SecondaryButton } from '../../components/ui';
-import { EVENT_FACE_TOTALS, SAMPLE_EVENT, SAMPLE_FACE } from '../../data/sample';
-import { digitsOnly, findByInvitation, formatInvitation, sampleFaceMatch } from '../../domain/rules';
+import { getGateStats, resolveCheckIn, searchFace } from '../../api/event';
+import { digitsOnly, formatInvitation } from '../../domain/rules';
 import { useTx } from '../../i18n';
 import type { CheckStackParamList } from '../../navigation/types';
-import { useSession } from '../../state/session';
+import { errorMessage, useSession } from '../../state/session';
 import { ProtocolChrome } from './MyPostScreen';
 import { Text } from '../../theme/text';
 import { colors, radius } from '../../theme/tokens';
@@ -20,21 +19,17 @@ type FacePhase = 'ready' | 'searching' | 'match' | 'none';
 export function CheckInScreen({ navigation }: Props) {
   const { tx } = useTx();
   const session = useSession();
+  const eventId = session.post?.eventId;
+  const gateId = session.post?.gateId;
   const [mode, setMode] = useState<Mode>('face');
   const [phase, setPhase] = useState<FacePhase>('ready');
   const [typed, setTyped] = useState('');
-  const [numberError, setNumberError] = useState(false);
+  const [numberError, setNumberError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [today, setToday] = useState<number | null>(null);
+  const [atGate, setAtGate] = useState<number | null>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const qrHandled = useRef(false);
-  const match = sampleFaceMatch(session.people, session.enrolledIds);
-  const totals = EVENT_FACE_TOTALS[SAMPLE_EVENT] ?? { enrolled: 0, invited: 0 };
-  const extraEnrolled = session.enrolledIds.filter(
-    (id) => session.people.find((person) => person.id === id)?.baseStatus !== 'enrolled',
-  ).length;
-  const enrolledCount = Math.min(totals.invited, totals.enrolled + extraEnrolled);
-  const matchPhoto = match
-    ? session.enrolments.find((entry) => entry.personId === match.id)?.photoUri
-    : undefined;
 
   useEffect(() => {
     if (!permission?.granted) {
@@ -42,34 +37,71 @@ export function CheckInScreen({ navigation }: Props) {
     }
   }, [permission?.granted, requestPermission]);
 
-  const openConfirm = (personId: string, how: 'face' | 'qr' | 'number') => {
-    navigation.navigate('Confirm', { personId, how });
+  useEffect(() => {
+    if (!eventId || !gateId) {
+      void session.loadPost();
+      return;
+    }
+    void getGateStats(eventId, gateId)
+      .then((stats) => {
+        setToday(stats.admittedTodayEvent ?? null);
+        setAtGate(stats.admittedTodayGate ?? null);
+      })
+      .catch(() => undefined);
+  }, [eventId, gateId]);
+
+  const openConfirm = async (raw: string, how: 'qr' | 'number') => {
+    if (!eventId || !gateId) {
+      setNumberError(tx('You are not assigned to a gate.', 'Vous n’êtes pas affecté à une porte.'));
+      return;
+    }
+    const code = digitsOnly(raw);
+    if (code.length !== 8) {
+      setNumberError(tx('No invitation with that number', 'Aucune invitation avec ce numéro'));
+      return;
+    }
+    setBusy(true);
+    setNumberError('');
+    try {
+      const resolved = await resolveCheckIn(eventId, gateId, code);
+      if (resolved.arrivalsToday != null) setToday(resolved.arrivalsToday);
+      if (resolved.arrivalsAtGate != null) setAtGate(resolved.arrivalsAtGate);
+      if (resolved.outcome === 'NOT_INVITED' && !resolved.resolutionToken) {
+        setNumberError(tx('No invitation with that number', 'Aucune invitation avec ce numéro'));
+        return;
+      }
+      navigation.navigate('Confirm', { how, resolve: resolved });
+    } catch (caught) {
+      setNumberError(errorMessage(caught, tx('No invitation with that number', 'Aucune invitation avec ce numéro')));
+    } finally {
+      setBusy(false);
+      qrHandled.current = false;
+    }
   };
 
-  const scanFace = () => {
+  const scanFace = async () => {
     setPhase('searching');
-    setTimeout(() => {
-      setPhase(match ? 'match' : 'none');
-    }, 1800);
+    if (!eventId || !gateId) {
+      setPhase('none');
+      return;
+    }
+    try {
+      await searchFace(eventId, gateId);
+      setPhase('none');
+    } catch {
+      setPhase('none');
+    }
   };
 
   const faceCaption =
     phase === 'searching'
-      ? tx(`Looking among ${enrolledCount} enrolled faces…`, `Recherche parmi ${enrolledCount} visages enregistrés…`)
-      : phase === 'match'
-        ? tx('Match found', 'Correspondance trouvée')
-        : phase === 'none'
-          ? tx('No match found', 'Aucune correspondance')
-          : tx('Ask the person to look at the camera', 'Demandez à la personne de regarder l’appareil');
+      ? tx('Looking among enrolled faces…', 'Recherche parmi les visages enregistrés…')
+      : phase === 'none'
+        ? tx('Face search is not available', 'La recherche par visage n’est pas disponible')
+        : tx('Ask the person to look at the camera', 'Demandez à la personne de regarder l’appareil');
 
   const lookupNumber = (raw: string) => {
-    const person = findByInvitation(session.people, raw);
-    if (!person) {
-      setNumberError(true);
-      return;
-    }
-    setNumberError(false);
-    openConfirm(person.id, 'number');
+    void openConfirm(raw, 'number');
   };
 
   return (
@@ -91,7 +123,7 @@ export function CheckInScreen({ navigation }: Props) {
                 onPress={() => {
                   setMode(id);
                   setPhase('ready');
-                  setNumberError(false);
+                  setNumberError('');
                 }}
                 style={[styles.mode, selected ? styles.modeOn : null]}
               >
@@ -107,7 +139,9 @@ export function CheckInScreen({ navigation }: Props) {
               {permission?.granted ? (
                 <CameraView style={StyleSheet.absoluteFill} facing="front" />
               ) : (
-                <Image source={SAMPLE_FACE} style={StyleSheet.absoluteFill} resizeMode="cover" />
+                <View style={[StyleSheet.absoluteFill, { alignItems: 'center', justifyContent: 'center', padding: 24 }]}>
+                  <Text style={styles.captionText}>{tx('Allow the camera to scan a face or a QR code.', 'Autorisez l’appareil photo pour scanner un visage ou un code QR.')}</Text>
+                </View>
               )}
               <View pointerEvents="none" style={styles.ovalWrap}>
                 <View style={styles.oval} />
@@ -123,8 +157,8 @@ export function CheckInScreen({ navigation }: Props) {
                 <PrimaryButton label={tx('Scan their face', 'Scanner le visage')} icon="scan-outline" onPress={scanFace} />
                 <Text style={styles.help}>
                   {tx(
-                    'The face is compared with every face enrolled for this event. No code needed.',
-                    'Le visage est comparé à tous les visages enregistrés pour cet événement. Aucun code n’est nécessaire.',
+                    'Face search is not on this backend yet. Use the QR code or the 8-digit number.',
+                    'La recherche par visage n’est pas encore sur ce serveur. Utilisez le code QR ou le numéro à 8 chiffres.',
                   )}
                 </Text>
               </>
@@ -134,39 +168,13 @@ export function CheckInScreen({ navigation }: Props) {
                 <Text style={styles.searchingText}>{tx('Searching…', 'Recherche…')}</Text>
               </View>
             ) : null}
-            {phase === 'match' && match ? (
-              <>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={match.name}
-                  onPress={() => openConfirm(match.id, 'face')}
-                  style={styles.matchCard}
-                >
-                  <Image
-                    source={matchPhoto ? { uri: matchPhoto } : SAMPLE_FACE}
-                    style={styles.matchPhoto}
-                    resizeMode="cover"
-                  />
-                  <View style={styles.matchText}>
-                    <Text style={styles.matchName}>{match.name}</Text>
-                    <Text style={styles.matchMeta}>
-                      {tx(`97% match · ${match.cell} · ${match.role}`, `Correspondance 97 % · ${match.cell} · ${match.role}`)}
-                    </Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={18} color={colors.successText} />
-                </Pressable>
-                <Pressable accessibilityRole="button" onPress={() => setPhase('ready')} style={styles.rescan}>
-                  <Text style={styles.rescanText}>{tx('Not them — scan again', 'Ce n’est pas cette personne — scanner encore')}</Text>
-                </Pressable>
-              </>
-            ) : null}
             {phase === 'none' ? (
               <View style={styles.none}>
-                <Text style={styles.noneTitle}>{tx('No match found', 'Aucune correspondance')}</Text>
+                <Text style={styles.noneTitle}>{tx('Face search is not available', 'La recherche par visage n’est pas disponible')}</Text>
                 <Text style={styles.noneBody}>
                   {tx(
-                    'Their face may not be enrolled yet. Scan their QR code or type their number — you can enrol their face from there.',
-                    'Le visage n’est peut-être pas encore enregistré. Scannez le code QR ou saisissez le numéro — vous pourrez enregistrer le visage ensuite.',
+                    'There is no face-matching service on this backend. Scan their QR code or type their 8-digit number.',
+                    'Il n’y a pas de comparaison de visages sur ce serveur. Scannez le code QR ou saisissez le numéro à 8 chiffres.',
                   )}
                 </Text>
                 <View style={styles.noneActions}>
@@ -191,11 +199,11 @@ export function CheckInScreen({ navigation }: Props) {
                   facing="back"
                   barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
                   onBarcodeScanned={({ data }) => {
-                    if (qrHandled.current) return;
-                    const person = findByInvitation(session.people, digitsOnly(data));
-                    if (!person) return;
+                    if (qrHandled.current || busy) return;
+                    const code = digitsOnly(data);
+                    if (code.length !== 8) return;
                     qrHandled.current = true;
-                    openConfirm(person.id, 'qr');
+                    void openConfirm(code, 'qr');
                   }}
                 />
               ) : null}
@@ -205,11 +213,6 @@ export function CheckInScreen({ navigation }: Props) {
             {!permission?.granted ? (
               <SecondaryButton label={tx('Allow the camera', 'Autoriser l’appareil photo')} onPress={() => void requestPermission()} />
             ) : null}
-            <PrimaryButton
-              label={tx('Scan the code', 'Scanner le code')}
-              icon="qr-code"
-              onPress={() => openConfirm('ange', 'qr')}
-            />
             <SecondaryButton
               label={tx('Type their number instead', 'Saisir le numéro à la place')}
               icon="keypad-outline"
@@ -226,11 +229,11 @@ export function CheckInScreen({ navigation }: Props) {
             </View>
             <Keypad
               onDigit={(digit) => {
-                setNumberError(false);
+                setNumberError('');
                 setTyped((current) => digitsOnly(current + digit).slice(0, 8));
               }}
               onDelete={() => {
-                setNumberError(false);
+                setNumberError('');
                 setTyped((current) => digitsOnly(current).slice(0, -1));
               }}
             />
@@ -241,10 +244,7 @@ export function CheckInScreen({ navigation }: Props) {
                 <Text style={styles.disabledFindText}>{tx('Find the person', 'Trouver la personne')}</Text>
               </View>
             )}
-            {numberError ? <Text style={styles.error}>{tx('No invitation with that number', 'Aucune invitation avec ce numéro')}</Text> : null}
-            <Text style={styles.help}>
-              {tx('Sample number:', 'Numéro d’exemple :')} <Text style={styles.strong}>5347 6150</Text>
-            </Text>
+            {numberError ? <Text style={styles.error}>{numberError}</Text> : null}
             <Pressable accessibilityRole="button" onPress={() => setMode('qr')}>
               <Text style={styles.link}>{tx('Scan QR code instead', 'Scanner le code QR à la place')}</Text>
             </Pressable>
@@ -253,10 +253,10 @@ export function CheckInScreen({ navigation }: Props) {
 
         <View style={styles.counters}>
           <Text style={styles.counter}>
-            {tx('In today', 'Aujourd’hui')} <Text style={styles.counterValue}>184</Text>
+            {tx('In today', 'Aujourd’hui')} <Text style={styles.counterValue}>{today ?? '—'}</Text>
           </Text>
           <Text style={styles.counter}>
-            {tx('This gate', 'Cette porte')} <Text style={styles.counterValue}>{62 + session.admissions.length}</Text>
+            {tx('This gate', 'Cette porte')} <Text style={styles.counterValue}>{atGate ?? '—'}</Text>
           </Text>
         </View>
       </View>
