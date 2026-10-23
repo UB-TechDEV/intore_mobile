@@ -2,7 +2,7 @@
 
 Expo / React Native phone apps for the FPR Diaspora events system.
 
-This repository covers the **protocol** gate app (post, faces, check-in), the **member** app (home, pay, profile), and the **2027 host ballot**. Layout and copy follow the diaspora-ems prototype. Sample data on the phone is not connected to a live backend.
+This repository covers the **protocol** gate app (post, faces, check-in), the **member** app (home, pay, profile), and the **2027 host ballot**. Layout and copy follow the diaspora-ems prototype. The phones call the QA services — there is no mock login.
 
 ## Run
 
@@ -13,23 +13,30 @@ npx expo start
 
 Open the project in **Expo Go** (SDK 57).
 
-## Sample sign-in
+## Sign in
 
-| | |
+Use the **email or national ID** and password of a QA account. After sign-in, if the account has both Protocol and Member roles, choose which app to open.
+
+API host (override with `EXPO_PUBLIC_API_HOST` if needed):
+
+`https://apis-qa-events.intoresolutions.rw`
+
+## What the phones call
+
+| App | Services |
 | --- | --- |
-| Username | `f.karangwa` |
-| Password | `diaspora-demo` |
+| Protocol | `auth`, `event` |
+| Member / ballot | `auth`, `member`, `event` (host-votes), `contribution` |
 
-After sign-in, choose **Protocol** or **Member**.
+Face search and ballot face verification are documented on the backend but return **503** — the screens fall back to QR/number and PIN.
 
-Other sample values from the prototype:
-
-- Enrolment code: `4829`
-- Ange invitation: `5347 6150`
-- Unpaid invitation: `2200 1876`
-
-Face match scores and liveness ticks are prototype simulations, not a production SDK.
+Enrolment codes are **6 digits**. Invitation / QR codes are **8 digits**. Check-in is resolve → SMS OTP → entrance photo → admit.
 
 ## Backend
 
-The phone is not wired to a server yet. What we need from the backend for every screen action is in [docs/backend-contract.md](docs/backend-contract.md).
+Live Swagger:
+
+- https://apis-qa-events.intoresolutions.rw/auth/api/v1/swagger-ui/index.html
+- https://apis-qa-events.intoresolutions.rw/event/api/v1/swagger-ui/index.html
+- https://apis-qa-events.intoresolutions.rw/member/api/v1/swagger-ui/index.html
+- https://apis-qa-events.intoresolutions.rw/contribution/api/v1/swagger-ui/index.html

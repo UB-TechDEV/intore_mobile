@@ -1,13 +1,14 @@
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { useMemo, useState } from 'react';
-import { FlatList, Pressable, StyleSheet, View } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
+import { useCallback, useMemo, useState } from 'react';
+import { ActivityIndicator, FlatList, Pressable, StyleSheet, View } from 'react-native';
 import { Avatar, Pill, SearchField, Segmented } from '../../components/ui';
-import { EVENT_FACE_TOTALS, SAMPLE_CELLS, SAMPLE_EVENT, SAMPLE_EVENTS } from '../../data/sample';
-import { faceStatus, type FaceStatus } from '../../domain/rules';
+import { initialsOf, mapFaceStatus } from '../../api/format';
+import { errorMessage, useSession } from '../../state/session';
+import type { FaceStatus } from '../../domain/rules';
 import { useTx } from '../../i18n';
 import type { FacesStackParamList } from '../../navigation/types';
 import { ProtocolChrome } from './MyPostScreen';
-import { useSession } from '../../state/session';
 import { Text } from '../../theme/text';
 import { colors, displayName, radius } from '../../theme/tokens';
 
@@ -15,25 +16,57 @@ type Props = NativeStackScreenProps<FacesStackParamList, 'FacesHome'>;
 
 export function FacesScreen({ navigation }: Props) {
   const { tx } = useTx();
-  const { people, enrolledIds } = useSession();
+  const session = useSession();
   const [query, setQuery] = useState('');
-  const [eventName, setEventName] = useState(SAMPLE_EVENT);
+  const [eventId, setEventId] = useState<string | undefined>(session.post?.eventId);
   const [cell, setCell] = useState('All cells');
   const [filter, setFilter] = useState<'todo' | 'enrolled' | 'all'>('todo');
   const [showEvents, setShowEvents] = useState(false);
   const [showCells, setShowCells] = useState(false);
+  const [loading, setLoading] = useState(!session.faces);
+  const [error, setError] = useState('');
+
+  const loadFaces = session.loadFaces;
+  const assignedEventId = session.post?.eventId;
+  const load = useCallback(
+    async (id?: string) => {
+      setLoading(true);
+      setError('');
+      try {
+        await loadFaces(id);
+      } catch (caught) {
+        setError(errorMessage(caught, tx('Could not load the faces list.', 'Impossible de charger la liste des visages.')));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [loadFaces, tx],
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      void load(eventId ?? assignedEventId);
+    }, [assignedEventId, eventId, load]),
+  );
+
+  const faces = session.faces;
+  const people = faces?.people ?? [];
+  const events = faces?.events ?? [];
+  const cells = useMemo(() => {
+    const names = [...new Set(people.map((person) => person.cell).filter(Boolean))] as string[];
+    return ['All cells', ...names];
+  }, [people]);
 
   const rows = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return people
-      .map((person) => ({ person, status: faceStatus(person, enrolledIds) }))
-      .filter(({ person }) => person.events.includes(eventName))
+      .map((person) => ({ person, status: mapFaceStatus(person.status) }))
       .filter(({ person }) => cell === 'All cells' || person.cell === cell)
       .filter(({ person }) => {
         if (!needle) return true;
         return (
-          person.name.toLowerCase().includes(needle) ||
-          person.documentNumber.toLowerCase().replace(/\s/g, '').includes(needle.replace(/\s/g, ''))
+          (person.name ?? '').toLowerCase().includes(needle) ||
+          (person.nationalId ?? '').toLowerCase().replace(/\s/g, '').includes(needle.replace(/\s/g, ''))
         );
       })
       .filter(({ status }) => {
@@ -41,12 +74,11 @@ export function FacesScreen({ navigation }: Props) {
         if (filter === 'enrolled') return status === 'enrolled';
         return status !== 'enrolled';
       });
-  }, [people, enrolledIds, query, eventName, cell, filter]);
+  }, [people, query, cell, filter]);
 
-  const totals = EVENT_FACE_TOTALS[eventName] ?? { enrolled: 0, invited: 0 };
-  const extraEnrolled = enrolledIds.filter((id) => people.find((person) => person.id === id)?.baseStatus !== 'enrolled').length;
-  const enrolled = Math.min(totals.invited, totals.enrolled + extraEnrolled);
-  const remaining = Math.max(totals.invited - enrolled, 0);
+  const enrolled = faces?.enrolled ?? 0;
+  const total = faces?.total ?? 0;
+  const remaining = Math.max(total - enrolled, 0);
   const toEnrol = rows.filter((row) => row.status !== 'enrolled').length;
 
   return (
@@ -61,10 +93,10 @@ export function FacesScreen({ navigation }: Props) {
             <View style={styles.summary}>
               <Text style={styles.summaryLabel}>{tx('Faces enrolled for this event', 'Visages enregistrés pour cet événement')}</Text>
               <Text style={styles.summaryCount}>
-                {enrolled} {tx('of', 'sur')} {totals.invited}
+                {enrolled} {tx('of', 'sur')} {total}
               </Text>
               <View style={styles.track}>
-                <View style={[styles.fill, { width: `${totals.invited ? (enrolled / totals.invited) * 100 : 0}%` }]} />
+                <View style={[styles.fill, { width: `${total ? (enrolled / total) * 100 : 0}%` }]} />
               </View>
               <Text style={styles.summaryNote}>
                 {tx(
@@ -89,7 +121,7 @@ export function FacesScreen({ navigation }: Props) {
                   setShowCells(false);
                 }}
               >
-                <Text numberOfLines={1} style={styles.selectText}>{eventName}</Text>
+                <Text numberOfLines={1} style={styles.selectText}>{faces?.eventName || tx('Event', 'Événement')}</Text>
                 <Text style={styles.chevron}>▾</Text>
               </Pressable>
               <Pressable
@@ -107,16 +139,25 @@ export function FacesScreen({ navigation }: Props) {
             </View>
             {showEvents ? (
               <View style={styles.menu}>
-                {SAMPLE_EVENTS.map((item) => (
-                  <Pressable key={item} accessibilityRole="button" onPress={() => { setEventName(item); setShowEvents(false); }} style={styles.menuItem}>
-                    <Text style={styles.menuText}>{item}</Text>
+                {events.map((item) => (
+                  <Pressable
+                    key={item.id}
+                    accessibilityRole="button"
+                    onPress={() => {
+                      setEventId(item.id);
+                      setShowEvents(false);
+                      void load(item.id);
+                    }}
+                    style={styles.menuItem}
+                  >
+                    <Text style={styles.menuText}>{item.name}</Text>
                   </Pressable>
                 ))}
               </View>
             ) : null}
             {showCells ? (
               <View style={styles.menu}>
-                {SAMPLE_CELLS.map((item) => (
+                {cells.map((item) => (
                   <Pressable key={item} accessibilityRole="button" onPress={() => { setCell(item); setShowCells(false); }} style={styles.menuItem}>
                     <Text style={styles.menuText}>{item === 'All cells' ? tx('All cells', 'Toutes les cellules') : item}</Text>
                   </Pressable>
@@ -135,6 +176,8 @@ export function FacesScreen({ navigation }: Props) {
             <Text style={styles.count}>
               {tx(`${rows.length} people · ${toEnrol} to enrol`, `${rows.length} personnes · ${toEnrol} à enregistrer`)}
             </Text>
+            {error ? <Text style={styles.empty}>{error}</Text> : null}
+            {loading ? <ActivityIndicator color={colors.primary} /> : null}
           </View>
         }
         renderItem={({ item }) => (
@@ -144,18 +187,15 @@ export function FacesScreen({ navigation }: Props) {
             onPress={() => navigation.navigate('Enrol', { personId: item.person.id })}
             style={({ pressed }) => [styles.row, pressed ? styles.pressed : null]}
           >
-            <Avatar initials={item.person.initials} size={44} accessibilityLabel={item.person.name} />
+            <Avatar initials={initialsOf(item.person.name)} size={44} accessibilityLabel={item.person.name ?? ''} />
             <View style={styles.rowText}>
               <Text style={styles.name}>{item.person.name}</Text>
-              <Text style={styles.meta}>{item.person.cell} · {item.person.role}</Text>
+              <Text style={styles.meta}>{[item.person.cell, item.person.role].filter(Boolean).join(' · ')}</Text>
             </View>
             <StatusBadge status={item.status} />
           </Pressable>
         )}
-        ListEmptyComponent={<Text style={styles.empty}>{tx('Nobody here.', 'Personne ici.')}</Text>}
-        ListFooterComponent={
-          <Text style={styles.hint}>{tx('Tap Uwase Ange to try the enrolment.', 'Touchez Uwase Ange pour essayer l’enregistrement.')}</Text>
-        }
+        ListEmptyComponent={!loading ? <Text style={styles.empty}>{tx('Nobody here.', 'Personne ici.')}</Text> : null}
       />
     </ProtocolChrome>
   );
@@ -286,11 +326,5 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     color: colors.muted,
     padding: 24,
-  },
-  hint: {
-    textAlign: 'center',
-    color: colors.muted,
-    fontSize: 12,
-    marginTop: 8,
   },
 });

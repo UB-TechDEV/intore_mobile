@@ -6,13 +6,13 @@ import { Alert, Linking, Modal, Pressable, ScrollView, StyleSheet, View } from '
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Avatar, Group, NavRow, SectionLabel, ToggleRow } from '../../components/ui';
-import { OFFICER, PROTOCOL_LEAD } from '../../data/sample';
-import type { ProfileLanguage } from '../../i18n';
-import { useTx } from '../../i18n';
+import { formatDay, maskId } from '../../api/format';
+import { updateMe } from '../../api/auth';
+import { useTx, type ProfileLanguage } from '../../i18n';
 import type { ProfileStackParamList, RootStackParamList } from '../../navigation/types';
 import { MemberChrome } from '../member/MemberScreens';
 import { ProtocolChrome } from '../protocol/MyPostScreen';
-import { useSession } from '../../state/session';
+import { errorMessage, useSession } from '../../state/session';
 import { Text, TextInput } from '../../theme/text';
 import { colors, displayName, displayTitle, radius } from '../../theme/tokens';
 
@@ -24,14 +24,15 @@ export function ProtocolProfileScreen({ navigation }: Props) {
   return (
     <ProtocolChrome title={tx('Profile', 'Profil')}>
       <ProfileBody
-        roleLine={tx('Protocol officer · Gate 2', 'Agent protocole · Porte 2')}
+        roleLine={tx(`Protocol officer${session.post?.gateName ? ` · ${session.post.gateName}` : ''}`, `Agent protocole${session.post?.gateName ? ` · ${session.post.gateName}` : ''}`)}
         today={
           <View>
             <SectionLabel>{tx('Today', 'Aujourd’hui')}</SectionLabel>
             <Group>
-              <Info title={tx('Your shift', 'Votre vacation')} subtitle="Fri 30 Oct · 07:30 – 13:00" />
-              <Info title={tx('Protocol lead', 'Responsable protocole')} subtitle={`${PROTOCOL_LEAD.name} · ${PROTOCOL_LEAD.phone}`} />
-              <Info title={tx('Your post', 'Votre poste')} subtitle={tx('Gate 2 · Delegates and committees', 'Porte 2 · Délégués et commissions')} />
+              <Info title={tx('Your post', 'Votre poste')} subtitle={[session.post?.gateName, session.post?.purpose].filter(Boolean).join(' · ') || '—'} />
+              {session.post?.assignedBy ? (
+                <Info title={tx('Assigned by', 'Affecté par')} subtitle={session.post.assignedBy} />
+              ) : null}
             </Group>
           </View>
         }
@@ -70,10 +71,15 @@ export function ProtocolProfileScreen({ navigation }: Props) {
                   )
                 }
               />
-              <NavRow
-                title={tx('Call the protocol lead', 'Appeler le responsable protocole')}
-                onPress={() => void Linking.openURL(PROTOCOL_LEAD.phoneHref)}
-              />
+              {session.post?.colleagues?.find((person) => person.phone)?.phone ? (
+                <NavRow
+                  title={tx('Call the protocol lead', 'Appeler le responsable protocole')}
+                  onPress={() => {
+                    const phone = session.post?.colleagues?.find((person) => person.phone)?.phone;
+                    if (phone) void Linking.openURL(`tel:${phone.replace(/\s/g, '')}`);
+                  }}
+                />
+              ) : null}
             </Group>
           </View>
         }
@@ -86,11 +92,12 @@ export function ProtocolProfileScreen({ navigation }: Props) {
 
 export function MemberProfileScreen() {
   const { tx } = useTx();
+  const session = useSession();
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   return (
     <MemberChrome title={tx('Profile', 'Profil')} subtitle={tx('Your account', 'Votre compte')}>
       <ProfileBody
-        roleLine={tx('Member · France cell', 'Membre · cellule France')}
+        roleLine={tx(`Member · ${session.member?.cellName || session.me?.memberType || '—'}`, `Membre · ${session.member?.cellName || session.me?.memberType || '—'}`)}
         onPersonal={() => navigation.getParent()?.navigate('PersonalDetails')}
         protocolCurrent={false}
       />
@@ -128,15 +135,19 @@ function ProfileBody({
   };
   const languageLabel = profileLanguage === 'fr' ? 'Français' : profileLanguage === 'rw' ? 'Kinyarwanda' : 'English';
 
-  const switchRole = (role: 'protocol' | 'member') => {
-    session.setRole(role);
-    resetRoot(role === 'protocol' ? 'Protocol' : 'Member');
+  const switchRole = async (role: 'protocol' | 'member') => {
+    try {
+      await session.enterRole(role);
+      resetRoot(role === 'protocol' ? 'Protocol' : 'Member');
+    } catch {
+      resetRoot(role === 'protocol' ? 'Protocol' : 'Member');
+    }
   };
 
   return (
     <View style={styles.body}>
       <View style={styles.identity}>
-        <Avatar initials="KF" size={60} filled accessibilityLabel={session.fullName} />
+        <Avatar initials={session.initials} size={60} filled accessibilityLabel={session.fullName} />
         <View style={styles.identityText}>
           <Text style={styles.name}>{session.fullName}</Text>
           <Text style={styles.roleLine}>{roleLine}</Text>
@@ -147,20 +158,24 @@ function ProfileBody({
       <View>
         <SectionLabel>{tx('Switch role', 'Changer de rôle')}</SectionLabel>
         <Group>
-          <RoleRow
-            initials="PO"
-            title={tx('Protocol officer', 'Agent protocole')}
-            subtitle="RPF Europe Retreat — Poland · Gate 2"
-            current={protocolCurrent}
-            onPress={() => switchRole('protocol')}
-          />
-          <RoleRow
-            initials="M"
-            title={tx('Member', 'Membre')}
-            subtitle={tx('France cell', 'Cellule France')}
-            current={!protocolCurrent}
-            onPress={() => switchRole('member')}
-          />
+          {session.phoneRoles.includes('protocol') ? (
+            <RoleRow
+              initials="PO"
+              title={tx('Protocol officer', 'Agent protocole')}
+              subtitle={[session.post?.eventName, session.post?.gateName].filter(Boolean).join(' · ') || tx('Gate assignment', 'Affectation de porte')}
+              current={protocolCurrent}
+              onPress={() => void switchRole('protocol')}
+            />
+          ) : null}
+          {session.phoneRoles.includes('member') ? (
+            <RoleRow
+              initials="M"
+              title={tx('Member', 'Membre')}
+              subtitle={session.member?.cellName || tx('Your cell', 'Votre cellule')}
+              current={!protocolCurrent}
+              onPress={() => void switchRole('member')}
+            />
+          ) : null}
         </Group>
         <Text style={styles.note}>{tx('You keep one account. Switching changes what the app shows.', 'Vous gardez un seul compte. Le changement modifie ce que l’app affiche.')}</Text>
       </View>
@@ -183,8 +198,7 @@ function ProfileBody({
           title={tx('Sign out', 'Se déconnecter')}
           destructive
           onPress={() => {
-            session.signOut();
-            resetRoot('SignIn');
+            void session.signOut().then(() => resetRoot('SignIn'));
           }}
         />
       </Group>
@@ -204,8 +218,12 @@ function ProfileBody({
                 accessibilityRole="button"
                 accessibilityState={{ selected: profileLanguage === id }}
                 onPress={() => {
-                  setLanguage(id as ProfileLanguage);
+                  const next = id as ProfileLanguage;
+                  setLanguage(next);
                   setLanguageOpen(false);
+                  if (session.fullName && session.email) {
+                    void updateMe({ displayName: session.fullName, email: session.email, preferredLanguage: next });
+                  }
                 }}
                 style={styles.sheetRow}
               >
@@ -277,6 +295,8 @@ export function PersonalDetailsScreen() {
   const [email, setEmail] = useState(session.email);
   const [phone, setPhone] = useState(session.phone);
   const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
 
   return (
     <View style={[styles.screen, { paddingTop: insets.top }]}>
@@ -289,8 +309,8 @@ export function PersonalDetailsScreen() {
         <Text accessibilityRole="header" style={styles.title}>{tx('Personal details', 'Informations personnelles')}</Text>
         <Text style={styles.detailsNote}>
           {tx(
-            'Saved on this phone. Email and phone changes are not sent to a server in this build.',
-            'Enregistré sur ce téléphone. Les changements d’e-mail et de téléphone ne sont pas envoyés à un serveur dans cette version.',
+            'Saved on your account. A changed email takes effect immediately.',
+            'Enregistré sur votre compte. Un e-mail modifié prend effet immédiatement.',
           )}
         </Text>
         <Field label={tx('Full name', 'Nom complet')} value={fullName} onChangeText={setFullName} />
@@ -298,22 +318,34 @@ export function PersonalDetailsScreen() {
         <Field label={tx('Phone', 'Téléphone')} value={phone} onChangeText={setPhone} keyboardType="phone-pad" />
         <View style={styles.locked}>
           <Text style={styles.infoTitle}>{tx('Cell', 'Cellule')}</Text>
-          <Text style={styles.infoSubtitle}>{OFFICER.cell} · {tx('member since', 'membre depuis')} {OFFICER.memberSince}</Text>
+          <Text style={styles.infoSubtitle}>
+            {session.member?.cellName || '—'}
+            {session.member?.joinedOn ? ` · ${tx('member since', 'membre depuis')} ${formatDay(session.member.joinedOn)}` : ''}
+          </Text>
         </View>
         <View style={styles.locked}>
           <Text style={styles.infoTitle}>{tx('ID or passport', 'Pièce d’identité')}</Text>
-          <Text style={styles.infoSubtitle}>{OFFICER.idMasked}</Text>
+          <Text style={styles.infoSubtitle}>{maskId(session.member?.idNumber, session.member?.idType || 'ID') || '—'}</Text>
         </View>
+        {saveError ? <Text style={{ color: colors.dangerText, fontWeight: '600' }}>{saveError}</Text> : null}
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={tx('Save changes', 'Enregistrer')}
+          disabled={saving}
           onPress={() => {
-            session.updateProfile({ fullName: fullName.trim(), email: email.trim(), phone: phone.trim() });
-            setSaved(true);
+            setSaving(true);
+            setSaveError('');
+            void session
+              .saveProfile({ displayName: fullName.trim(), email: email.trim(), phoneNumber: phone.trim() })
+              .then(() => setSaved(true))
+              .catch((caught) => setSaveError(errorMessage(caught, tx('Could not save.', 'Impossible d’enregistrer.'))))
+              .finally(() => setSaving(false));
           }}
           style={styles.save}
         >
-          <Text style={styles.saveText}>{saved ? tx('Saved', 'Enregistré') : tx('Save changes', 'Enregistrer')}</Text>
+          <Text style={styles.saveText}>
+            {saving ? tx('Saving…', 'Enregistrement…') : saved ? tx('Saved', 'Enregistré') : tx('Save changes', 'Enregistrer')}
+          </Text>
         </Pressable>
       </ScrollView>
     </View>

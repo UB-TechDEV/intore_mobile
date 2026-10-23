@@ -32,7 +32,8 @@
             "./assets/fonts/Glancyr-Bold.otf"
           ]
         }
-      ]
+      ],
+      "expo-secure-store"
     ],
     "android": {
       "adaptiveIcon": {

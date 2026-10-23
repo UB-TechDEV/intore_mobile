@@ -1,17 +1,18 @@
 import { CommonActions, useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import { MAX_SIGN_IN_ATTEMPTS, SAMPLE_PASSWORD, SAMPLE_USERNAME, verifySampleSignIn } from '../../domain/rules';
+import { isApiError } from '../../api/problem';
 import { useTx } from '../../i18n';
 import type { RootStackParamList } from '../../navigation/types';
-import { useSession } from '../../state/session';
+import { assignmentFor, errorMessage, phoneRolesOf, useSession, type PhoneRole } from '../../state/session';
 import { Text, TextInput } from '../../theme/text';
 import { colors, radius } from '../../theme/tokens';
+import * as authApi from '../../api/auth';
 
-type Stage = 'sign-in' | 'reset' | 'reset-sent' | 'username' | 'username-sent' | 'roles';
+type Stage = 'sign-in' | 'reset' | 'reset-sent' | 'roles';
 
 export function SignInScreen() {
   const { tx } = useTx();
@@ -19,35 +20,78 @@ export function SignInScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const session = useSession();
   const [stage, setStage] = useState<Stage>('sign-in');
-  const [username, setUsername] = useState('');
+  const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [hidden, setHidden] = useState(true);
-  const [attempts, setAttempts] = useState(0);
   const [error, setError] = useState('');
-  const locked = attempts >= MAX_SIGN_IN_ATTEMPTS;
+  const [busy, setBusy] = useState(false);
 
-  const enter = (role: 'protocol' | 'member') => {
-    session.signIn();
-    session.setRole(role);
-    navigation.dispatch(CommonActions.reset({ index: 0, routes: [{ name: role === 'protocol' ? 'Protocol' : 'Member' }] }));
+  const go = (name: keyof RootStackParamList) => {
+    navigation.dispatch(CommonActions.reset({ index: 0, routes: [{ name }] }));
   };
 
-  const submit = () => {
-    if (locked) return;
-    if (verifySampleSignIn(username, password)) {
-      setError('');
-      setAttempts(0);
-      setStage('roles');
-      return;
+  const enter = async (role: PhoneRole) => {
+    setBusy(true);
+    setError('');
+    try {
+      await session.enterRole(role);
+      go(role === 'protocol' ? 'Protocol' : 'Member');
+    } catch (caught) {
+      setError(errorMessage(caught, tx('Could not open that role.', 'Impossible d’ouvrir ce rôle.')));
+    } finally {
+      setBusy(false);
     }
-    const next = attempts + 1;
-    setAttempts(next);
-    setError(
-      next >= MAX_SIGN_IN_ATTEMPTS
-        ? tx('Account locked until a system admin unlocks it.', 'Compte bloqué jusqu’au déverrouillage par un administrateur.')
-        : tx('Username or password is wrong.', 'Nom d’utilisateur ou mot de passe incorrect.'),
-    );
   };
+
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const me = await session.signIn(identifier, password);
+      const roles = phoneRolesOf(me);
+      if (roles.length === 0) {
+        setError(tx('This account has no phone role.', 'Ce compte n’a pas de rôle pour le téléphone.'));
+        await session.signOut();
+        return;
+      }
+      if (roles.length === 1) {
+        await enter(roles[0]);
+        return;
+      }
+      setStage('roles');
+    } catch (caught) {
+      if (isApiError(caught) && caught.code === 'rate_limited') {
+        setError(
+          tx(
+            `Too many attempts — try again in ${caught.retryAfter ?? 30}s.`,
+            `Trop de tentatives — réessayez dans ${caught.retryAfter ?? 30} s.`,
+          ),
+        );
+      } else {
+        setError(errorMessage(caught, tx('Email, national ID or password is wrong.', 'E-mail, pièce d’identité ou mot de passe incorrect.')));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const sendReset = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await authApi.forgotPassword(identifier.trim());
+      setStage('reset-sent');
+    } catch (caught) {
+      setError(errorMessage(caught, tx('Could not send the reset email.', 'Impossible d’envoyer l’e-mail de réinitialisation.')));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const protocol = assignmentFor(session.me, 'protocol');
+  const member = assignmentFor(session.me, 'member');
 
   return (
     <View style={[styles.screen, { paddingTop: insets.top }]}>
@@ -59,8 +103,17 @@ export function SignInScreen() {
         {stage === 'sign-in' ? (
           <View style={styles.card}>
             <Text style={styles.heading}>{tx('Sign in', 'Connexion')}</Text>
-            <Text style={styles.lead}>{tx('Enter your username and password.', 'Saisissez votre nom d’utilisateur et votre mot de passe.')}</Text>
-            <Field label={tx('Username', 'Nom d’utilisateur')} value={username} onChangeText={setUsername} placeholder="e.g. ange.uwase" autoCapitalize="none" />
+            <Text style={styles.lead}>
+              {tx('Enter your email or national ID, and your password.', 'Saisissez votre e-mail ou votre pièce d’identité, et votre mot de passe.')}
+            </Text>
+            <Field
+              label={tx('Email or national ID', 'E-mail ou pièce d’identité')}
+              value={identifier}
+              onChangeText={setIdentifier}
+              placeholder="e.g. name@diaspora.rw"
+              autoCapitalize="none"
+              keyboardType="email-address"
+            />
             <View>
               <Field label={tx('Password', 'Mot de passe')} value={password} onChangeText={setPassword} secure={hidden} />
               <Pressable accessibilityRole="button" accessibilityLabel={hidden ? tx('Show password', 'Afficher le mot de passe') : tx('Hide password', 'Masquer le mot de passe')} onPress={() => setHidden((value) => !value)}>
@@ -68,39 +121,41 @@ export function SignInScreen() {
               </Pressable>
             </View>
             {error ? <Text style={styles.error}>{error}</Text> : null}
-            <Pressable accessibilityRole="button" accessibilityLabel={tx('Sign in', 'Connexion')} disabled={locked} onPress={submit} style={[styles.button, locked ? styles.buttonOff : null]}>
-              <Text style={styles.buttonText}>{tx('Sign in', 'Connexion')}</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel={tx('Sign in', 'Connexion')} disabled={busy} onPress={() => void submit()} style={[styles.button, busy ? styles.buttonOff : null]}>
+              {busy ? <ActivityIndicator color={colors.white} /> : <Text style={styles.buttonText}>{tx('Sign in', 'Connexion')}</Text>}
             </Pressable>
-            <Pressable accessibilityRole="button" onPress={() => setStage('reset')}><Text style={styles.link}>{tx('Forgot your password?', 'Mot de passe oublié ?')}</Text></Pressable>
-            <Pressable accessibilityRole="button" onPress={() => setStage('username')}><Text style={styles.link}>{tx('Forgot your username?', 'Nom d’utilisateur oublié ?')}</Text></Pressable>
-            <Text style={styles.note}>{tx('New member? Your cell leader added you. Use the link in your welcome email to set your password first.', 'Nouveau membre ? Votre responsable vous a ajouté. Utilisez le lien de l’e-mail de bienvenue pour choisir votre mot de passe.')}</Text>
-            <Text style={styles.sample}>{tx(`Sample account: ${SAMPLE_USERNAME} · ${SAMPLE_PASSWORD}. No server is connected.`, `Compte d’exemple : ${SAMPLE_USERNAME} · ${SAMPLE_PASSWORD}. Aucun serveur n’est connecté.`)}</Text>
+            <Pressable accessibilityRole="button" onPress={() => { setError(''); setStage('reset'); }}><Text style={styles.link}>{tx('Forgot your password?', 'Mot de passe oublié ?')}</Text></Pressable>
+            <Text style={styles.note}>
+              {tx(
+                'New member? Your cell leader added you. Use the link in your welcome email to set your password first.',
+                'Nouveau membre ? Votre responsable vous a ajouté. Utilisez le lien de l’e-mail de bienvenue pour choisir votre mot de passe.',
+              )}
+            </Text>
           </View>
         ) : null}
 
-        {stage === 'reset' || stage === 'username' ? (
+        {stage === 'reset' ? (
           <View style={styles.card}>
-            <Text style={styles.heading}>{stage === 'reset' ? tx('Reset your password', 'Réinitialiser le mot de passe') : tx('Forgot your username?', 'Nom d’utilisateur oublié ?')}</Text>
+            <Text style={styles.heading}>{tx('Reset your password', 'Réinitialiser le mot de passe')}</Text>
             <Text style={styles.lead}>
-              {stage === 'reset'
-                ? tx('Enter your username. We email you a link to choose a new password.', 'Saisissez votre nom d’utilisateur. Nous vous envoyons un lien pour choisir un nouveau mot de passe.')
-                : tx('Enter the email on your profile and we will send your username to it.', 'Saisissez l’e-mail de votre profil et nous vous enverrons votre nom d’utilisateur.')}
+              {tx('Enter your email or national ID. If it is on an account, we email a link to choose a new password.', 'Saisissez votre e-mail ou votre pièce. S’il est sur un compte, nous envoyons un lien pour choisir un nouveau mot de passe.')}
             </Text>
-            <Field label={stage === 'reset' ? tx('Username', 'Nom d’utilisateur') : tx('Email', 'E-mail')} value={username} onChangeText={setUsername} autoCapitalize="none" keyboardType={stage === 'username' ? 'email-address' : 'default'} />
-            <Pressable accessibilityRole="button" onPress={() => setStage(stage === 'reset' ? 'reset-sent' : 'username-sent')} style={styles.button}>
-              <Text style={styles.buttonText}>{stage === 'reset' ? tx('Email me a reset link', 'M’envoyer un lien') : tx('Email me my username', 'M’envoyer mon nom d’utilisateur')}</Text>
+            <Field label={tx('Email or national ID', 'E-mail ou pièce d’identité')} value={identifier} onChangeText={setIdentifier} autoCapitalize="none" keyboardType="email-address" />
+            {error ? <Text style={styles.error}>{error}</Text> : null}
+            <Pressable accessibilityRole="button" disabled={busy} onPress={() => void sendReset()} style={styles.button}>
+              {busy ? <ActivityIndicator color={colors.white} /> : <Text style={styles.buttonText}>{tx('Email me a reset link', 'M’envoyer un lien')}</Text>}
             </Pressable>
             <Pressable accessibilityRole="button" onPress={() => setStage('sign-in')}><Text style={styles.link}>{tx('Back to sign in', 'Retour à la connexion')}</Text></Pressable>
           </View>
         ) : null}
 
-        {stage === 'reset-sent' || stage === 'username-sent' ? (
+        {stage === 'reset-sent' ? (
           <View style={styles.card}>
             <Text style={styles.heading}>{tx('Check your email', 'Vérifiez votre e-mail')}</Text>
             <Text style={styles.lead}>
               {tx(
-                'Nothing was sent. This build has no email server yet. Ask your cell leader if you are stuck.',
-                'Rien n’a été envoyé. Cette version n’a pas encore de serveur d’e-mail. Demandez à votre responsable si vous êtes bloqué.',
+                'If that email or ID is on an account, a reset link is on its way. Ask your cell leader if you are stuck.',
+                'Si cet e-mail ou cette pièce est sur un compte, un lien de réinitialisation est en route. Demandez à votre responsable si vous êtes bloqué.',
               )}
             </Text>
             <Pressable accessibilityRole="button" onPress={() => setStage('sign-in')} style={styles.button}>
@@ -114,14 +169,19 @@ export function SignInScreen() {
             <Text style={styles.heading}>{tx(`Signed in as ${session.fullName}`, `Connecté en tant que ${session.fullName}`)}</Text>
             <Text style={styles.lead}>{tx('Continue as', 'Continuer en tant que')}</Text>
             <Text style={styles.note}>{tx('Your account has these roles. You can switch at any time from your profile.', 'Votre compte a ces rôles. Vous pouvez changer à tout moment depuis votre profil.')}</Text>
-            <Pressable accessibilityRole="button" accessibilityLabel={tx('Protocol officer', 'Agent protocole')} onPress={() => enter('protocol')} style={styles.role}>
-              <Text style={styles.roleTitle}>{tx('Protocol officer', 'Agent protocole')}</Text>
-              <Text style={styles.roleBody}>RPF Europe Retreat — Poland · Gate 2</Text>
-            </Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel={tx('Member', 'Membre')} onPress={() => enter('member')} style={styles.role}>
-              <Text style={styles.roleTitle}>{tx('Member', 'Membre')}</Text>
-              <Text style={styles.roleBody}>{tx('France cell', 'Cellule France')}</Text>
-            </Pressable>
+            {error ? <Text style={styles.error}>{error}</Text> : null}
+            {protocol ? (
+              <Pressable accessibilityRole="button" accessibilityLabel={tx('Protocol officer', 'Agent protocole')} disabled={busy} onPress={() => void enter('protocol')} style={styles.role}>
+                <Text style={styles.roleTitle}>{tx('Protocol officer', 'Agent protocole')}</Text>
+                <Text style={styles.roleBody}>{protocol.orgUnitName || tx('Gate assignment', 'Affectation de porte')}</Text>
+              </Pressable>
+            ) : null}
+            {member ? (
+              <Pressable accessibilityRole="button" accessibilityLabel={tx('Member', 'Membre')} disabled={busy} onPress={() => void enter('member')} style={styles.role}>
+                <Text style={styles.roleTitle}>{tx('Member', 'Membre')}</Text>
+                <Text style={styles.roleBody}>{member.orgUnitName || session.member?.cellName || tx('Your cell', 'Votre cellule')}</Text>
+              </Pressable>
+            ) : null}
           </View>
         ) : null}
       </ScrollView>
@@ -181,7 +241,6 @@ const styles = StyleSheet.create({
   buttonText: { color: colors.white, fontWeight: '700' },
   link: { color: colors.primary, fontWeight: '600' },
   note: { color: colors.muted, fontSize: 12.5, lineHeight: 18 },
-  sample: { color: colors.inkSoft, fontSize: 12.5, lineHeight: 18 },
   error: { color: colors.dangerText, fontWeight: '600' },
   role: { borderWidth: 1, borderColor: colors.line, borderRadius: radius.md, padding: 14, gap: 2 },
   roleTitle: { color: colors.ink, fontSize: 16, fontWeight: '700' },

@@ -1,14 +1,15 @@
 import { Ionicons } from '@expo/vector-icons';
 import type { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
-import { useNavigation } from '@react-navigation/native';
-import type { ReactNode } from 'react';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { useCallback, type ReactNode } from 'react';
 import { ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Avatar, Card, PrimaryButton } from '../../components/ui';
-import { DUTY_DAYS, GATE_TEAM, OTHER_GATES, SAMPLE_EVENT } from '../../data/sample';
+import { formatDay, initialsOf } from '../../api/format';
 import { useTx } from '../../i18n';
 import type { ProtocolTabParamList } from '../../navigation/types';
+import { useSession } from '../../state/session';
 import { Text } from '../../theme/text';
 import { colors, displayTitle, radius, type } from '../../theme/tokens';
 
@@ -23,17 +24,18 @@ export function ProtocolChrome({
 }) {
   const insets = useSafeAreaInsets();
   const { tx } = useTx();
+  const session = useSession();
   const navigation = useNavigation<BottomTabNavigationProp<ProtocolTabParamList>>();
+  const post = session.post;
+  const day = post?.dayOfEdition && post?.totalDays ? `${post.dayOfEdition} / ${post.totalDays}` : post?.days ?? '';
+  const eventLine = [post?.eventName, post?.gateName, day].filter(Boolean).join(' · ');
   const header = (
     <View style={styles.header}>
       <View style={styles.headerText}>
         <View style={styles.eyebrowRow}>
           <View style={styles.live} />
           <Text style={styles.eyebrow} numberOfLines={1}>
-            {tx(
-              `${SAMPLE_EVENT} · Gate 2 · Day 1 of 2`,
-              `${SAMPLE_EVENT} · Porte 2 · Jour 1 sur 2`,
-            )}
+            {eventLine || tx('No live gate assignment', 'Aucune affectation de porte')}
           </Text>
         </View>
         <Text accessibilityRole="header" style={styles.title}>
@@ -42,7 +44,7 @@ export function ProtocolChrome({
       </View>
       <View style={styles.headerAvatar}>
         <Avatar
-          initials="KF"
+          initials={session.initials}
           filled
           accessibilityLabel={tx('Profile', 'Profil')}
           onPress={() => navigation.navigate('Profile', { screen: 'ProfileHome' })}
@@ -67,69 +69,100 @@ export function ProtocolChrome({
 
 export function MyPostScreen() {
   const { tx } = useTx();
+  const session = useSession();
   const navigation = useNavigation<BottomTabNavigationProp<ProtocolTabParamList>>();
+  useFocusEffect(
+    useCallback(() => {
+      void session.loadPost();
+    }, [session.loadPost]),
+  );
+  const post = session.post;
+  const assigned = post?.assignedAt ? formatDay(post.assignedAt) : '';
   return (
     <ProtocolChrome title={tx('My post', 'Mon poste')}>
       <View style={styles.stack}>
-        <View style={styles.hero}>
-          <Text style={styles.kicker}>{tx('Your post', 'Votre poste')}</Text>
-          <Text style={styles.gate}>Gate 2</Text>
-          <Text style={styles.purpose}>{tx('Delegates and committees', 'Délégués et commissions')}</Text>
-          <View style={styles.venueRow}>
-            <Ionicons name="location-sharp" size={14} color={colors.white} />
-            <Text style={styles.venue}>{SAMPLE_EVENT} · EXPO XXI, Warsaw</Text>
-          </View>
-        </View>
-
-        <Card>
-          <Text style={styles.cardTitle}>{tx('On duty every day of the event', 'De service chaque jour de l’événement')}</Text>
-          <View style={styles.dayList}>
-            {DUTY_DAYS.map((day) => (
-              <View key={day.id} style={[styles.day, day.current ? styles.dayOn : null]}>
-                <Text style={[styles.dayLabel, day.current ? styles.dayLabelOn : null]}>{day.label}</Text>
-                {day.note ? <Text style={styles.dayNote}>{tx('Today', 'Aujourd’hui')}</Text> : null}
-              </View>
-            ))}
-          </View>
-        </Card>
-
-        <Card>
-          <Text style={styles.cardTitle}>{tx('At Gate 2 with you', 'À la porte 2 avec vous')}</Text>
-          {GATE_TEAM.map((person) => (
-            <View key={person.id} style={styles.person}>
-              <Avatar initials={person.initials} size={34} accessibilityLabel={person.name} />
-              <View style={styles.personText}>
-                <Text style={styles.personName}>{person.name}</Text>
-                <Text style={styles.personDetail}>{person.detail}</Text>
+        {post ? (
+          <>
+            <View style={styles.hero}>
+              <Text style={styles.kicker}>{tx('Your post', 'Votre poste')}</Text>
+              <Text style={styles.gate}>{post.gateName || tx('Gate', 'Porte')}</Text>
+              <Text style={styles.purpose}>{post.purpose || ''}</Text>
+              <View style={styles.venueRow}>
+                <Ionicons name="location-sharp" size={14} color={colors.white} />
+                <Text style={styles.venue}>{[post.eventName, post.venue].filter(Boolean).join(' · ')}</Text>
               </View>
             </View>
-          ))}
-        </Card>
 
-        <Card>
-          <Text style={styles.cardTitle}>{tx('Other gates and desks', 'Autres portes et bureaux')}</Text>
-          {OTHER_GATES.map((gate) => (
-            <View key={gate.id} style={styles.gateRow}>
-              <View style={styles.personText}>
-                <Text style={styles.personName}>{gate.name}</Text>
-                <Text style={styles.personDetail}>{gate.purpose}</Text>
-              </View>
-              <Text style={styles.officerCount}>{gate.officers}</Text>
-            </View>
-          ))}
-        </Card>
+            {(post.dayRows ?? []).length > 0 ? (
+              <Card>
+                <Text style={styles.cardTitle}>{tx('On duty every day of the event', 'De service chaque jour de l’événement')}</Text>
+                <View style={styles.dayList}>
+                  {post.dayRows?.map((day) => (
+                    <View key={`${day.date}-${day.label}`} style={[styles.day, day.isToday ? styles.dayOn : null]}>
+                      <Text style={[styles.dayLabel, day.isToday ? styles.dayLabelOn : null]}>{day.label}</Text>
+                      {day.isToday ? <Text style={styles.dayNote}>{tx('Today', 'Aujourd’hui')}</Text> : null}
+                    </View>
+                  ))}
+                </View>
+              </Card>
+            ) : null}
 
-        <Text style={styles.note}>
-          {tx(
-            'Assigned by the Europe Committee on 2 Sep 2026. Ask your gate’s team or the committee if something changes.',
-            'Affecté par le comité Europe le 2 sep 2026. Demandez à l’équipe de votre porte ou au comité si quelque chose change.',
-          )}
-        </Text>
-        <PrimaryButton
-          label={tx('Start gate check', 'Commencer le contrôle')}
-          icon="scan-outline"
-          onPress={() => navigation.navigate('CheckIn', { screen: 'CheckHome' })}
-        />
+            {(post.colleagues ?? []).length > 0 ? (
+              <Card>
+                <Text style={styles.cardTitle}>{tx(`At ${post.gateName ?? 'this gate'} with you`, `À ${post.gateName ?? 'cette porte'} avec vous`)}</Text>
+                {post.colleagues?.map((person) => (
+                  <View key={`${person.name}-${person.phone}`} style={styles.person}>
+                    <Avatar initials={initialsOf(person.name)} size={34} accessibilityLabel={person.name ?? ''} />
+                    <View style={styles.personText}>
+                      <Text style={styles.personName}>{person.name}</Text>
+                      <Text style={styles.personDetail}>{[person.cell, person.role, person.phone].filter(Boolean).join(' · ')}</Text>
+                    </View>
+                  </View>
+                ))}
+              </Card>
+            ) : null}
+
+            {(post.otherGates ?? []).length > 0 ? (
+              <Card>
+                <Text style={styles.cardTitle}>{tx('Other gates and desks', 'Autres portes et bureaux')}</Text>
+                {post.otherGates?.map((gate) => (
+                  <View key={gate.name} style={styles.gateRow}>
+                    <View style={styles.personText}>
+                      <Text style={styles.personName}>{gate.name}</Text>
+                      <Text style={styles.personDetail}>{gate.detail}</Text>
+                    </View>
+                    {gate.officerCount != null ? (
+                      <Text style={styles.officerCount}>
+                        {gate.officerCount} {tx('officers', 'agents')}
+                      </Text>
+                    ) : null}
+                  </View>
+                ))}
+              </Card>
+            ) : null}
+
+            <Text style={styles.note}>
+              {post.assignedBy || assigned
+                ? tx(
+                    `Assigned${post.assignedBy ? ` by ${post.assignedBy}` : ''}${assigned ? ` on ${assigned}` : ''}. Ask your gate’s team or the committee if something changes.`,
+                    `Affecté${post.assignedBy ? ` par ${post.assignedBy}` : ''}${assigned ? ` le ${assigned}` : ''}. Demandez à l’équipe de votre porte ou au comité si quelque chose change.`,
+                  )
+                : tx('Ask your gate’s team or the committee if something changes.', 'Demandez à l’équipe de votre porte ou au comité si quelque chose change.')}
+            </Text>
+            <PrimaryButton
+              label={tx('Start gate check', 'Commencer le contrôle')}
+              icon="scan-outline"
+              onPress={() => navigation.navigate('CheckIn', { screen: 'CheckHome' })}
+            />
+          </>
+        ) : (
+          <Text style={styles.note}>
+            {tx(
+              'You are not assigned to a gate for a live event. Ask the protocol lead.',
+              'Vous n’êtes pas affecté à une porte pour un événement en cours. Demandez au responsable protocole.',
+            )}
+          </Text>
+        )}
       </View>
     </ProtocolChrome>
   );

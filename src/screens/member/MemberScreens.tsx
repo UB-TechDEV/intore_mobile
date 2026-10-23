@@ -1,17 +1,20 @@
 import { Ionicons } from '@expo/vector-icons';
 import type { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
-import { useNavigation } from '@react-navigation/native';
-import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { StatusBar } from 'expo-status-bar';
-import { useState, type ReactNode } from 'react';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { useCallback, useState, type ReactNode } from 'react';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Avatar } from '../../components/ui';
-import { MONTHS, PAYMENT_HISTORY, SAMPLE_EVENT } from '../../data/sample';
+import { getContributionEntries, getMyContributions, payMonth } from '../../api/contribution';
+import { daysUntil, formatDateRange, formatDay, formatMoney } from '../../api/format';
+import { digitsOnly, formatInvitation } from '../../domain/rules';
+import { getMemberHome } from '../../api/member';
+import type { ContributionEntryView, ContributionMeView, HomeView, MonthView } from '../../api/types';
 import { useTx } from '../../i18n';
-import type { MemberTabParamList, RootStackParamList } from '../../navigation/types';
-import { useSession } from '../../state/session';
+import type { MemberTabParamList } from '../../navigation/types';
+import { errorMessage, useSession } from '../../state/session';
 import { Text } from '../../theme/text';
 import { colors, displayTitle, font, radius } from '../../theme/tokens';
 
@@ -29,6 +32,7 @@ export function MemberChrome({
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<BottomTabNavigationProp<MemberTabParamList>>();
   const { tx } = useTx();
+  const session = useSession();
   return (
     <View style={[styles.screen, { paddingTop: insets.top }]}>
       <StatusBar style="dark" />
@@ -39,7 +43,7 @@ export function MemberChrome({
         </View>
         <View style={styles.headerAvatar}>
           <Avatar
-            initials="KF"
+            initials={session.initials}
             accessibilityLabel={tx('Profile', 'Profil')}
             onPress={() => navigation.navigate('Profile')}
           />
@@ -56,12 +60,32 @@ export function MemberChrome({
 export function MemberHomeScreen() {
   const { tx } = useTx();
   const navigation = useNavigation<BottomTabNavigationProp<MemberTabParamList>>();
-  const root = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
+  const session = useSession();
+  const [home, setHome] = useState<HomeView | null>(null);
+  const [error, setError] = useState('');
   const [toast, setToast] = useState('');
+
+  const loadHome = useCallback(() => {
+    void getMemberHome()
+      .then(setHome)
+      .catch((caught) => setError(errorMessage(caught, tx('Could not load home.', 'Impossible de charger l’accueil.'))));
+  }, [tx]);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadHome();
+    }, [loadHome]),
+  );
+
+  const next = home?.nextEvent;
+  const until = daysUntil(next?.startsOn);
+  const qrReady = next?.invitationIssued === true && next.qrPayload;
+  const firstName = home?.firstName || session.fullName.split(' ')[0] || session.fullName;
+
   return (
     <MemberChrome
-      title={tx('Hi, Fidèle', 'Bonjour, Fidèle')}
-      subtitle={tx('Member · France cell', 'Membre · cellule France')}
+      title={firstName ? tx(`Hi, ${firstName}`, `Bonjour, ${firstName}`) : tx('Home', 'Accueil')}
+      subtitle={tx(`Member · ${home?.cellName || session.member?.cellName || '—'}`, `Membre · ${home?.cellName || session.member?.cellName || '—'}`)}
       overlay={
         toast ? (
           <Pressable accessibilityRole="button" accessibilityLabel={tx('Dismiss', 'Fermer')} onPress={() => setToast('')} style={styles.toast}>
@@ -72,21 +96,29 @@ export function MemberHomeScreen() {
       }
     >
       <View style={styles.stack}>
-        <LinearGradient colors={['#1479B8', '#0E5E92']} start={{ x: 0.05, y: 0 }} end={{ x: 0.95, y: 1 }} style={styles.hero}>
-          <View style={styles.heroTop}>
-            <Text style={styles.kicker}>{tx('Your next event', 'Votre prochain événement')}</Text>
-            <View style={styles.days}>
-              <Text style={styles.daysText}>{tx('In 19 days', 'Dans 19 jours')}</Text>
+        {!home && !error ? <ActivityIndicator color={colors.primary} /> : null}
+        {error ? <Text style={styles.sample}>{error}</Text> : null}
+        {next ? (
+          <LinearGradient colors={['#1479B8', '#0E5E92']} start={{ x: 0.05, y: 0 }} end={{ x: 0.95, y: 1 }} style={styles.hero}>
+            <View style={styles.heroTop}>
+              <Text style={styles.kicker}>{tx('Your next event', 'Votre prochain événement')}</Text>
+              {until != null ? (
+                <View style={styles.days}>
+                  <Text style={styles.daysText}>
+                    {until >= 0 ? tx(`In ${until} days`, `Dans ${until} jours`) : tx('Now', 'Maintenant')}
+                  </Text>
+                </View>
+              ) : null}
             </View>
-          </View>
-          <Text style={styles.event}>{SAMPLE_EVENT}</Text>
-          <Text style={styles.when}>Fri 30 – Sat 31 Oct · EXPO XXI, Warsaw</Text>
-          <View style={styles.stats}>
-            <Stat label={tx('You gave', 'Vous avez donné')} value="€80" />
-            <Stat label={tx('France cell', 'Cellule France')} value="14%" />
-            <Stat label={tx('Closes', 'Clôture')} value="16 Oct" />
-          </View>
-        </LinearGradient>
+            <Text style={styles.event}>{next.title}</Text>
+            <Text style={styles.when}>{[formatDateRange(next.startsOn, next.endsOn), next.venue].filter(Boolean).join(' · ')}</Text>
+            <View style={styles.stats}>
+              <Stat label={tx('You gave', 'Vous avez donné')} value={formatMoney(next.youGave)} />
+              <Stat label={next.cellName || tx('Cell', 'Cellule')} value={next.cellPercent != null ? `${next.cellPercent}%` : '—'} />
+              <Stat label={tx('Closes', 'Clôture')} value={formatDay(next.contributionsCloseOn) || '—'} />
+            </View>
+          </LinearGradient>
+        ) : null}
         <View style={styles.qr}>
           <View style={styles.qrIcon}>
             <Ionicons name="ticket-outline" size={24} color={colors.warningText} />
@@ -94,48 +126,76 @@ export function MemberHomeScreen() {
           <View style={styles.qrText}>
             <Text style={styles.qrTitle}>{tx('Your QR codes', 'Vos codes QR')}</Text>
             <Text style={styles.qrBody}>
-              {tx(
-                'They arrive once your cell’s payments are checked.',
-                'Ils arrivent une fois les paiements de votre cellule vérifiés.',
-              )}
+              {qrReady
+                ? digitsOnly(next?.qrPayload ?? '').length === 8
+                  ? formatInvitation(next?.qrPayload ?? '')
+                  : next?.qrPayload
+                : tx(
+                    'They arrive once your cell’s payments are checked.',
+                    'Ils arrivent une fois les paiements de votre cellule vérifiés.',
+                  )}
             </Text>
           </View>
         </View>
         <View>
           <Text style={styles.section}>{tx('To do', 'À faire')}</Text>
           <View style={styles.group}>
-            <Todo
-              color={colors.primary}
-              mark="✓"
-              markSize={13}
-              first
-              title={tx('Vote for the 2027 host', 'Votez pour l’hôte 2027')}
-              subtitle={tx('Closes 25 Oct', 'Clôture le 25 oct')}
-              onPress={() => root.getParent()?.navigate('Ballot')}
-            />
-            <Todo
-              color={colors.live}
-              mark="€"
-              markSize={14}
-              title={tx('Pay your October contribution', 'Payez votre contribution d’octobre')}
-              subtitle={tx('€10 to the France cell', '10 € à la cellule France')}
-              onPress={() => navigation.navigate('Pay')}
-            />
-            <Todo
-              color={colors.message}
-              mark="MS"
-              markSize={13}
-              title={tx('Message from your cell', 'Message de votre cellule')}
-              subtitle={tx('Mukamana Solange · 2 days ago', 'Mukamana Solange · il y a 2 jours')}
-              onPress={() =>
-                setToast(
-                  tx(
-                    'Mukamana Solange: “Our cell is at 14% of its pledge — please give before 16 October.”',
-                    'Mukamana Solange : « Notre cellule est à 14 % de son engagement — merci de donner avant le 16 octobre. »',
-                  ),
-                )
+            {(home?.todo ?? []).map((item, index) => {
+              if (item.kind === 'VOTE') {
+                return (
+                  <Todo
+                    key={`vote-${item.eventId ?? index}`}
+                    color={colors.primary}
+                    mark="✓"
+                    markSize={13}
+                    first={index === 0}
+                    title={tx(`Vote for the ${item.hostYear ?? ''} host`, `Votez pour l’hôte ${item.hostYear ?? ''}`)}
+                    subtitle={item.eventTitle || ''}
+                    onPress={() => navigation.getParent()?.navigate('Ballot')}
+                  />
+                );
               }
-            />
+              if (item.kind === 'PAY_MONTH' || item.kind === 'GIVE_EVENT') {
+                return (
+                  <Todo
+                    key={`pay-${item.month ?? item.eventId ?? index}`}
+                    color={colors.live}
+                    mark="€"
+                    markSize={14}
+                    first={index === 0}
+                    title={
+                      item.kind === 'GIVE_EVENT'
+                        ? tx(`Give for ${item.eventTitle ?? 'the event'}`, `Donner pour ${item.eventTitle ?? 'l’événement'}`)
+                        : tx(`Pay your ${item.month ?? ''} contribution`, `Payez votre contribution ${item.month ?? ''}`)
+                    }
+                    subtitle={`${formatMoney(item.amount ?? item.pledge)}${item.cellName ? ` · ${item.cellName}` : ''}`}
+                    onPress={() => navigation.navigate('Pay')}
+                  />
+                );
+              }
+              return (
+                <Todo
+                  key={`${item.kind}-${index}`}
+                  color={colors.message}
+                  mark="·"
+                  first={index === 0}
+                  title={item.eventTitle || item.kind || ''}
+                  subtitle={item.cellName || ''}
+                  onPress={() => navigation.navigate('Pay')}
+                />
+              );
+            })}
+            {home?.fromCell ? (
+              <Todo
+                color={colors.message}
+                mark={(home.fromCell.senderName ?? '·').slice(0, 2).toUpperCase()}
+                markSize={11}
+                first={(home.todo ?? []).length === 0}
+                title={tx('Message from your cell', 'Message de votre cellule')}
+                subtitle={home.fromCell.senderName || ''}
+                onPress={() => setToast(home.fromCell?.excerpt || '')}
+              />
+            ) : null}
           </View>
         </View>
       </View>
@@ -188,63 +248,105 @@ function Todo({
   );
 }
 
+const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
 export function MemberPayScreen() {
   const { tx } = useTx();
-  const session = useSession();
-  const given = session.octoberPaid ? '€225' : '€215';
-  const history = session.octoberPaid
-    ? [{ id: 'october', name: tx('October payment', 'Paiement d’octobre'), detail: tx('Today · recorded for your cell leader', 'Aujourd’hui · à vérifier par votre responsable'), amount: '€10' }, ...PAYMENT_HISTORY]
-    : PAYMENT_HISTORY;
+  const year = new Date().getFullYear();
+  const [summary, setSummary] = useState<ContributionMeView | null>(null);
+  const [entries, setEntries] = useState<ContributionEntryView[]>([]);
+  const [pendingMonth, setPendingMonth] = useState<number | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const reload = useCallback(async () => {
+    const [nextSummary, nextEntries] = await Promise.all([getMyContributions(year), getContributionEntries(year)]);
+    setSummary(nextSummary);
+    setEntries(nextEntries.data ?? []);
+  }, [year]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void reload().catch((caught) => setError(errorMessage(caught, tx('Could not load contributions.', 'Impossible de charger les contributions.'))));
+    }, [reload, tx]),
+  );
+
+  const due: MonthView | undefined = summary?.months?.find((month) => month.status === 'DUE' && month.month === summary.openMonth)
+    ?? summary?.months?.find((month) => month.status === 'DUE');
+  const rate = summary?.monthlyRate ?? due?.amount ?? 10;
+  const currency = summary?.currency ?? 'EUR';
+
+  const pay = async () => {
+    if (!due?.month || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await payMonth({ year, month: due.month, amount: rate ?? 10, currency });
+      setPendingMonth(due.month);
+      await reload();
+    } catch (caught) {
+      setError(errorMessage(caught, tx('Could not record the payment.', 'Impossible d’enregistrer le paiement.')));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <MemberChrome title={tx('Pay', 'Payer')} subtitle={tx('Your contributions', 'Vos contributions')}>
       <View style={styles.stack}>
         <View style={styles.given}>
-          <Text style={styles.givenLabel}>{tx('Given in 2026', 'Donné en 2026')}</Text>
-          <Text style={styles.givenValue}>{given}</Text>
+          <Text style={styles.givenLabel}>{tx(`Given in ${summary?.year ?? year}`, `Donné en ${summary?.year ?? year}`)}</Text>
+          <Text style={styles.givenValue}>{formatMoney(summary?.given, currency)}</Text>
           <Text style={styles.givenLabel}>{tx('monthly payments, collections and events', 'mensualités, collectes et événements')}</Text>
         </View>
-        <Text style={styles.section}>{tx('Monthly payments · €10', 'Mensualités · 10 €')}</Text>
+        <Text style={styles.section}>{tx(`Monthly payments · ${formatMoney(rate, currency)}`, `Mensualités · ${formatMoney(rate, currency)}`)}</Text>
         <View style={styles.months}>
-          {MONTHS.map((month, index) => {
-            const paid = index < 9 || session.octoberPaid;
+          {(summary?.months ?? []).map((month) => {
+            const paid = month.status === 'PAID';
+            const pending = month.month === pendingMonth || month.status === 'TO_CHECK';
             return (
-              <View key={month} style={[styles.month, paid ? styles.monthPaid : styles.monthDue]}>
-                <Text style={[styles.monthName, paid ? styles.monthPaidText : styles.monthDueText]}>{month}</Text>
-                <Text style={[styles.monthState, paid ? styles.monthPaidText : styles.monthDueText]}>{paid ? '✓' : tx('Due', 'Dû')}</Text>
+              <View key={month.month} style={[styles.month, paid ? styles.monthPaid : styles.monthDue]}>
+                <Text style={[styles.monthName, paid ? styles.monthPaidText : styles.monthDueText]}>{MONTH_LABELS[(month.month ?? 1) - 1]}</Text>
+                <Text style={[styles.monthState, paid ? styles.monthPaidText : styles.monthDueText]}>
+                  {paid ? '✓' : pending ? '…' : tx('Due', 'Dû')}
+                </Text>
               </View>
             );
           })}
         </View>
-        {session.octoberPaid ? (
+        {pendingMonth ? (
           <View style={styles.paid}>
             <View style={styles.paidMark}><Text style={styles.markText}>✓</Text></View>
-            <Text style={styles.paidText}>{tx('October paid · your cell leader will check it', 'Octobre payé · votre responsable va le vérifier')}</Text>
+            <Text style={styles.paidText}>{tx('Recorded · your cell leader will check it', 'Noté · votre responsable va le vérifier')}</Text>
           </View>
-        ) : (
+        ) : due ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={tx('Pay October · €10', 'Payer octobre · 10 €')}
-            onPress={session.markOctoberPaid}
+            accessibilityLabel={tx(`Pay month ${due.month} · ${formatMoney(rate, currency)}`, `Payer le mois ${due.month} · ${formatMoney(rate, currency)}`)}
+            onPress={() => void pay()}
             style={styles.pay}
           >
-            <Text style={styles.payText}>{tx('Pay October · €10', 'Payer octobre · 10 €')}</Text>
+            <Text style={styles.payText}>
+              {busy ? tx('Saving…', 'Enregistrement…') : tx(`Pay · ${formatMoney(rate, currency)}`, `Payer · ${formatMoney(rate, currency)}`)}
+            </Text>
           </Pressable>
-        )}
+        ) : null}
         <Text style={styles.sample}>
           {tx(
-            'This records the payment for your cell leader to check. No bank or wallet is charged in this build.',
-            'Ceci note le paiement pour vérification par votre responsable. Aucune banque ni aucun portefeuille n’est débité dans cette version.',
+            'This records the payment for your cell leader to check. A month stays due until they confirm it. No bank is charged from this phone.',
+            'Ceci note le paiement pour vérification par votre responsable. Un mois reste dû jusqu’à leur confirmation. Aucune banque n’est débitée depuis ce téléphone.',
           )}
         </Text>
+        {error ? <Text style={styles.sample}>{error}</Text> : null}
         <Text style={styles.section}>{tx('History', 'Historique')}</Text>
         <View style={styles.group}>
-          {history.map((item) => (
+          {entries.map((item) => (
             <View key={item.id} style={styles.history}>
               <View style={styles.todoText}>
                 <Text style={styles.todoTitle}>{item.name}</Text>
-                <Text style={styles.todoSubtitle}>{item.detail}</Text>
+                <Text style={styles.todoSubtitle}>{[formatDay(item.occurredOn), item.how, item.status].filter(Boolean).join(' · ')}</Text>
               </View>
-              <Text style={styles.amount}>{item.amount}</Text>
+              <Text style={styles.amount}>{formatMoney(item.amount, item.currency)}</Text>
             </View>
           ))}
         </View>
